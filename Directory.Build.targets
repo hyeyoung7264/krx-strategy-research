@@ -1,0 +1,18 @@
+<Project>
+  <Target Name="EmbedResearchSourceManifest" BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <_ResearchSource Include="$(MSBuildThisFileDirectory)src/**/*.cs;$(MSBuildThisFileDirectory)src/**/*.csproj"
+                       Exclude="$(MSBuildThisFileDirectory)src/**/obj/**;$(MSBuildThisFileDirectory)src/**/bin/**" />
+      <_ResearchSource Include="$(MSBuildThisFileDirectory)Directory.Build.props;$(MSBuildThisFileDirectory)Directory.Build.targets;$(MSBuildThisFileDirectory)Investment.sln;$(MSBuildThisFileDirectory)NuGet.Config" />
+    </ItemGroup>
+    <GetFileHash Files="@(_ResearchSource)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="_ResearchSourceHash" />
+    </GetFileHash>
+    <WriteLinesToFile File="$(IntermediateOutputPath)research-source-manifest.txt"
+                      Lines="@(_ResearchSourceHash->'%(FileHash)|%(FullPath)')"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" Encoding="UTF-8" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)research-source-manifest.txt" LogicalName="Investment.SourceManifest" />
+    </ItemGroup>
+  </Target>
+</Project>

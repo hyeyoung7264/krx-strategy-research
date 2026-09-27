@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup><ItemGroup><ProjectReference Include="../Investment.Core/Investment.Core.csproj" /><ProjectReference Include="../Investment.Persistence/Investment.Persistence.csproj" /></ItemGroup></Project>

@@ -1,0 +1,10 @@
+{
+  "Version": "example-requires-review",
+  "SnapshotFiles": [ "artifacts/krx-raw-REPLACE_ID.json" ],
+  "Sessions": [ "2026-09-25" ],
+  "Universe": [
+    { "Ticker": "005930", "Date": "2026-09-25", "Sector": "REPLACE_WITH_HISTORICAL_SECTOR", "Member": true, "Tradable": true, "AvailableAt": "2026-09-26T08:00:00+09:00", "CorporateAction": false }
+  ],
+  "PointInTimeReviewed": false,
+  "ReviewEvidence": ""
+}
