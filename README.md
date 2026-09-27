@@ -63,9 +63,14 @@ CSV 수입은 `PointInTimeCertified=false`로 생성됩니다. 인증은 데이�
 ```powershell
 dotnet run --project src/Investment.Cli --no-restore -- dart-disclosures --start 2026-09-01 --end 2026-09-26
 dotnet run --project src/Investment.Cli --no-restore -- dart-company --corp-code 00126380
+dotnet run --project src/Investment.Cli --no-restore -- dart-check
 ```
 
-최종보고서만 선택하지 않고 정정보고서까지 수집합니다. 접수번호와 원본 페이지를 보존합니다. API의 날짜 정밀도로 실제 장중 공개시각을 알 수 없으므로 공시 사용 시각은 `max(실제 관측시각, 접수일 다음 날 00:00 KST)`입니다. 오늘 받은 과거 공시를 과거에 알고 있었던 입력으로 사용하지 않습니다. 현재 `rm`의 후속 정정/철회 정보는 과거 전략 feature로 노출하지 않습니다. 기업개황은 오늘의 snapshot이며 과거 종목 master로 사용하지 않습니다. 호출 오류·조회 결과 없음·불완전 pagination을 구분합니다. 실제 API 호출은 인증키 확보 전 미검증입니다.
+최종보고서만 선택하지 않고 정정보고서까지 수집합니다. 접수번호와 원본 페이지를 보존합니다. API의 날짜 정밀도로 실제 장중 공개시각을 알 수 없으므로 공시 사용 시각은 `max(실제 관측시각, 접수일 다음 날 00:00 KST)`입니다. 오늘 받은 과거 공시를 과거에 알고 있었던 입력으로 사용하지 않습니다. 현재 `rm`의 후속 정정/철회 정보는 과거 전략 feature로 노출하지 않습니다. 기업개황은 오늘의 snapshot이며 과거 종목 master로 사용하지 않습니다. 호출 오류·조회 결과 없음·불완전 pagination을 구분합니다.
+
+`dart-check`는 공식 기업개황 API를 최대 한 번 호출하고, 호출 전 attempt와 완료 receipt를 로컬 증거에 저장합니다. HTTP 오류·거절된 리디렉션·API 상태 코드·비정상 JSON·네트워크 실패를 구분하며 자동 재시도하지 않습니다. 오류 응답 본문·전체 URL·Location·예외 메시지는 저장하지 않습니다. 성공 시 회사 식별자를 대조하고 현재 관측한 원본과 hash를 보존합니다. 키가 반사된 응답은 보존하지 않으며 인증 성공으로 인정하지 않습니다. 진단은 투자 승격이나 역사적 데이터 인증과 별개입니다.
+
+2026-09-27 로컬 키를 확인하고 실제 공시검색·기업개황을 호출했으나 HTTP 302와 공식 `/error1.html` 오류 페이지 응답으로 실패했습니다. 로그인 포털의 승인 표시만으로 API 인증 성공을 주장하지 않습니다. 정상 `000` JSON과 원본 수집은 아직 확인되지 않았습니다.
 
 ## PostgreSQL
 

@@ -97,6 +97,18 @@ try
             var data = KrxDatasetBuilder.Build(manifest.SnapshotFiles.Select(Load<KrxSnapshot>).ToArray(), manifest);
             Print(new { path = store.Save("dataset", data.Hash, data), data.PointInTimeCertified, Note = "Review corporate actions, historical universe, sector classification, publication timing and session calendar before certification." }); break;
         }
+        case "dart-check":
+        {
+            var key = ApiKey("OPENDART_API_KEY"); var id = Guid.NewGuid().ToString("N");
+            var corp = Option("--corp-code", "00126380");
+            if (key.Length != 40 || !key.All(char.IsAsciiLetterOrDigit) || corp.Length != 8 || !corp.All(char.IsAsciiDigit))
+                throw new ArgumentException("A local 40-character OpenDART key and eight-digit company code are required.");
+            store.Save("dart-attempt", id, new { Id = id, CorpCode = corp, StartedAt = DateTimeOffset.UtcNow, MaximumRequests = 1 });
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
+            var result = await DartConnection.Check(http, key, corp, id);
+            Print(new { path = store.Save("dart-check", id, result), result.Status, result.Authenticated, result.HttpStatus, result.ApiStatus, result.RedirectClass });
+            return result.Authenticated ? 0 : 2;
+        }
         case "dart-disclosures":
         {
             var key = ApiKey("OPENDART_API_KEY");
@@ -239,6 +251,7 @@ try
                   krx-fetch --market KOSPI|KOSDAQ --date DATE | krx-build --manifest JSON
                   krx-collect --plan JSON [--max-requests 5] [--interval-seconds 1]
                   dart-disclosures --start DATE --end DATE [--corp-code CODE] | dart-company --corp-code CODE
+                  dart-check [--corp-code CODE]
                   db-schema | db-init | db-check
                 Source is checked against the compiled binary and archived automatically. Execution is virtual.
                 """); break;
