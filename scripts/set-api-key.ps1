@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('KRX_API_KEY', 'OPENDART_API_KEY')]
+    [ValidateSet('KRX_API_KEY', 'OPENDART_API_KEY', 'OPENAI_API_KEY')]
     [string]$Name
 )
 

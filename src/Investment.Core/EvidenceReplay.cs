@@ -7,6 +7,13 @@ public sealed record ReplayCheck(bool Matches, string[] Differences, string Orig
     string CodeHash, string Runtime, string Note = "Reproduction only; it creates no new independent test or forward paper evidence.");
 public static class EvidenceReplay
 {
+    public static ReplayCheck Cohort(Dataset data, CohortResult expected, SourceSnapshot archived, SourceSnapshot current)
+    {
+        Provenance(data, expected.DataHash, expected.Holdout.CodeVersion, archived, current);
+        var actual = new CohortAgent().Run(data, expected.Candidates, expected.Plan, expected.Holdout.Costs, expected.Holdout.Risk, current.Hash, expected.HypothesesCreatedAt);
+        var differences = new List<string>(); Compare("cohort", expected, actual, differences);
+        return new(differences.Count == 0, differences.ToArray(), expected.Id, data.Hash, current.Hash, current.Runtime);
+    }
     public static ReplayCheck Research(Dataset data, ResearchResult expected, SourceSnapshot archived, SourceSnapshot current)
     {
         Provenance(data, expected.DataHash, expected.Holdout.CodeVersion, archived, current);

@@ -16,7 +16,7 @@ public sealed record PaperState(string SessionId, string[] ResearchEvidenceIds, 
     DateTimeOffset LastObservation, string? BaselineRegime, bool Halted, bool VerifiedFeed,
     Bar[] History, Signal[] PendingSignals, PaperPosition[] Positions, PaperFill[] Fills,
     EquityPoint[] Equity, PaperAudit[] Audit, decimal Turnover, Dictionary<string, int>? LiquidityUsed = null, string CodeVersion = "",
-    int ResearchCandidateCount = 0);
+    int ResearchCandidateCount = 0, string CohortEvidenceId = "");
 
 public static class PaperEngine
 {
@@ -24,6 +24,17 @@ public static class PaperEngine
         SourceSnapshot currentSource, decimal initial = 100_000_000m)
     {
         history.Validate(); costs.Validate(); risk.Validate();
+        if (archives.Length == 1 && archives[0].Cohort is { } cohort)
+        {
+            var archive = archives[0];
+            if (history.Synthetic || !history.PointInTimeCertified || archive.Data.Hash != history.Hash)
+                throw new ArgumentException("Paper cohort requires the same real certified dataset.");
+            var replay = archive.Reproduce(currentSource);
+            if (!replay.Matches) throw new ArgumentException("Paper cohort archive reproduction failed: " + string.Join(",", replay.Differences));
+            if (cohort.Evaluation.Decision != "PAPER_ELIGIBLE" || cohort.CreatedAt > now)
+                throw new ArgumentException("Ineligible or future cohort portfolio evidence.");
+            return StartCore(cohort.Families, history, costs, risk, now, currentSource.Hash, initial, cohort);
+        }
         if (history.Synthetic || !history.PointInTimeCertified || archives.Length < 2)
             throw new ArgumentException("Paper requires real certified history and at least two complete research archives.");
         var evidence = archives.Select(archive =>
@@ -37,7 +48,7 @@ public static class PaperEngine
         return StartCore(evidence, history, costs, risk, now, currentSource.Hash, initial);
     }
     private static PaperState StartCore(ResearchResult[] evidence, Dataset history, Costs costs, Risk risk, DateTimeOffset now,
-        string codeVersion, decimal initial = 100_000_000m)
+        string codeVersion, decimal initial = 100_000_000m, CohortResult? cohort = null)
     {
         history.Validate(); costs.Validate(); risk.Validate();
         if (initial <= 0 || history.Synthetic || !history.PointInTimeCertified || evidence.Length < 2)
@@ -51,11 +62,14 @@ public static class PaperEngine
         if (specs.Select(s => s.Id).Distinct().Count() != specs.Length || specs.Select(s => s.Family).Distinct().Count() < 2)
             throw new ArgumentException("Diversify distinct versions and strategy families; correlation still requires review.");
         if (history.Bars.Any(b => b.AvailableAt >= now || Clock.Close(b.Date) >= now)) throw new ArgumentException("Future paper seed.");
+        if (cohort == null) throw new ArgumentException("Independent winning results require joint portfolio validation; use a complete cohort archive.");
+        if (cohort.Holdout.Costs != costs || cohort.Holdout.Risk != risk || cohort.Holdout.CodeVersion != codeVersion ||
+            !cohort.Holdout.Strategies.SequenceEqual(specs)) throw new ArgumentException("Cohort portfolio settings/version mismatch.");
         var signals = Signals(history.Bars, specs, now);
-        return new(Guid.NewGuid().ToString("N"), evidence.Select(e => e.Id).ToArray(), specs, costs, risk, initial, initial,
+        return new(Guid.NewGuid().ToString("N"), new[] { cohort.Id }.Concat(evidence.Select(e => e.Id)).ToArray(), specs, costs, risk, initial, initial,
             initial, initial, null, now, BacktestEngine.Regime(history, history.Dates.Length - 1, now), false, false,
             history.Bars, signals, [], [], [], [], 0, CodeVersion: codeVersion,
-            ResearchCandidateCount: evidence.SelectMany(e => e.Candidates).Select(s => s.Id).Distinct().Count());
+            ResearchCandidateCount: cohort.DeclaredHypotheses, CohortEvidenceId: cohort.Id);
     }
 
     public static PaperState Step(PaperState state, Observation observation, DateTimeOffset now)

@@ -29,7 +29,7 @@ public static class Statistics
     // Moving-block bootstrap preserves short-range dependence. Bonferroni corrects the declared candidate count.
     public static decimal LowerMeanBound(decimal[] returns, int candidates, int seed = 271828, int samples = 4000, int block = 5)
     {
-        if (returns.Length < 30 || candidates < 1 || samples < 1000 || block < 1) return decimal.MinValue;
+        if (returns.Length < 30 || candidates < 1 || samples < 1000 || block < 1 || samples * .05 / candidates < 1) return decimal.MinValue;
         var random = new Random(seed); var means = new decimal[samples];
         for (var s = 0; s < samples; s++)
         {

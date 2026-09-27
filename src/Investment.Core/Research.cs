@@ -71,7 +71,7 @@ public sealed class ResearchAgent
     private static RunResult Select(RunResult[] training, Risk risk) => training
         .OrderByDescending(r => r.Metrics.MaximumDrawdown <= risk.Drawdown && r.Metrics.ExpectedValuePerTrade > 0)
         .ThenByDescending(r => r.Metrics.TotalReturn).ThenBy(r => r.Strategies[0].Id, StringComparer.Ordinal).First();
-    private static bool Basic(RunResult r, ResearchPlan p, Risk risk) => r.Equity.Length >= p.MinimumEvaluationSessions &&
+    internal static bool Basic(RunResult r, ResearchPlan p, Risk risk) => r.Equity.Length >= p.MinimumEvaluationSessions &&
         r.Metrics.NumberOfTrades >= p.MinimumTrades && r.Metrics.ExpectedValuePerTrade > 0 && r.Metrics.TotalReturn > 0 &&
         r.Metrics.MaximumDrawdown <= risk.Drawdown && r.Events.Length == 0;
 }

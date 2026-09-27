@@ -5,6 +5,38 @@ namespace Investment.Core;
 
 public static class ReportWriter
 {
+    public static string Markdown(CohortResult result)
+    {
+        string P(decimal value) => value.ToString("P4", CultureInfo.InvariantCulture);
+        string Bound(decimal value) => value == decimal.MinValue ? "insufficient evidence/resolution" : P(value);
+        var text = new StringBuilder();
+        text.AppendLine("# Family and portfolio research cohort");
+        text.AppendLine(); text.AppendLine($"Decision: **{result.Evaluation.Decision}**. Synthetic: **{result.Synthetic}**. Point-in-time certified: **{result.PointInTimeCertified}**.");
+        text.AppendLine("Historical simulation only; no forward paper performance or live approval.");
+        text.AppendLine($"Cohort: `{result.Id}`. Dataset: `{result.DataHash}`. Source: `{result.Holdout.CodeVersion}`.");
+        text.AppendLine($"Preregistered multiple-test count: {result.DeclaredHypotheses} (standalone candidates plus all one-per-family combinations).");
+        text.AppendLine(); foreach (var reason in result.Evaluation.Reasons) text.AppendLine("- " + reason);
+        text.AppendLine(); text.AppendLine("## Family holdouts"); text.AppendLine();
+        text.AppendLine("| Family | Selected from training | Gate | Net return | MDD | Closed trades | Adjusted lower daily mean |");
+        text.AppendLine("|---|---|---|---:|---:|---:|---:|");
+        foreach (var family in result.Families)
+            text.AppendLine($"| {family.Holdout.Strategies.Single().Family} | {family.Holdout.Strategies.Single().Id} | {family.Evaluation.Decision} | {P(family.Holdout.Metrics.TotalReturn)} | {P(family.Holdout.Metrics.MaximumDrawdown)} | {family.Holdout.Metrics.NumberOfTrades} | {Bound(family.Evaluation.LowerDailyMean)} |");
+        text.AppendLine(); text.AppendLine("## Shared-capital portfolio walk-forward"); text.AppendLine();
+        text.AppendLine("| Fold | Future test | Versions | Validation passed | Test return | MDD | Trades |");
+        text.AppendLine("|---|---|---|---|---:|---:|---:|");
+        foreach (var fold in result.Folds)
+            text.AppendLine($"| {fold.Index} | {fold.Test.Start:yyyy-MM-dd} to {fold.Test.End:yyyy-MM-dd} | {string.Join("; ", fold.SelectedIds)} | {fold.ValidationPassed} | {P(fold.Test.Metrics.TotalReturn)} | {P(fold.Test.Metrics.MaximumDrawdown)} | {fold.Test.Metrics.NumberOfTrades} |");
+        text.AppendLine(); text.AppendLine("## Joint holdout"); text.AppendLine();
+        text.AppendLine($"{result.Holdout.Start:yyyy-MM-dd} to {result.Holdout.End:yyyy-MM-dd}. All versions were selected without holdout data.");
+        text.AppendLine($"Net return: {P(result.Holdout.Metrics.TotalReturn)}. Gross separate simulation: {P(result.Holdout.GrossMetrics?.TotalReturn ?? result.Holdout.Metrics.TotalReturn)}. MDD: {P(result.Holdout.Metrics.MaximumDrawdown)}. Closed trades: {result.Holdout.Metrics.NumberOfTrades}.");
+        text.AppendLine($"Adjusted lower daily mean: {Bound(result.Evaluation.LowerDailyMean)}. Daily 1% remains a measurement target, never a gate.");
+        text.AppendLine(); text.AppendLine("## Correlation diagnostics"); text.AppendLine();
+        foreach (var pair in result.Correlations)
+            text.AppendLine($"- {pair.FirstFamily}/{pair.SecondFamily}, {pair.Sessions} aligned daily sessions: {pair.Correlation?.ToString("F4", CultureInfo.InvariantCulture) ?? "undefined (flat returns)"}.");
+        text.AppendLine("Correlation is a historical diagnostic, not proof of independence or a new selection rule. The portfolio simulation shares cash, security/sector/strategy caps and liquidity between families.");
+        text.AppendLine("Small samples, bootstrap assumptions, gaps, suspensions and daily-bar fill approximations limit inference. Insufficient tail resolution fails the statistical gate. Real forward paper evidence remains required.");
+        return text.ToString();
+    }
     public static string Markdown(ResearchResult result)
     {
         string P(decimal value) => value.ToString("P4", CultureInfo.InvariantCulture);

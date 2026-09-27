@@ -1,0 +1,8 @@
+{
+  "Model": "",
+  "Enabled": false,
+  "MaximumRequests": 1,
+  "MaximumOutputTokens": 2048,
+  "MaximumInputCharacters": 64000,
+  "CandidateLimit": 8
+}

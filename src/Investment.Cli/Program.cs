@@ -9,7 +9,7 @@ try
     T Load<T>(string path) => JsonSerializer.Deserialize<T>(File.ReadAllText(path)) ?? throw new ArgumentException("Empty JSON.");
     void Print(object value) => Console.WriteLine(JsonSerializer.Serialize(value, DataFiles.Json));
     var command = args.FirstOrDefault() ?? "help";
-    var allowedOptions = new HashSet<string> { "--dataset", "--output", "--config", "--csv", "--source", "--start", "--end", "--corp-code", "--evidence", "--state", "--observation", "--persist", "--date", "--market", "--manifest", "--source-archive", "--archive", "--plan", "--max-requests", "--interval-seconds" };
+    var allowedOptions = new HashSet<string> { "--dataset", "--output", "--config", "--csv", "--source", "--start", "--end", "--corp-code", "--evidence", "--state", "--observation", "--persist", "--date", "--market", "--manifest", "--source-archive", "--archive", "--plan", "--max-requests", "--interval-seconds", "--ai-config" };
     for (var i = 1; i < args.Length; i++)
     {
         if (!allowedOptions.Contains(args[i])) throw new ArgumentException("Unknown or duplicated positional argument; no live-order options exist.");
@@ -23,7 +23,7 @@ try
     if (!File.Exists(configPath)) throw new ArgumentException("Research configuration file not found; run from repository root.");
     var settings = Load<Settings>(configPath);
     settings.Costs.Validate(); settings.Risk.Validate(); settings.Plan.Validate();
-    Dataset GetData() => command == "demo" ? DataFiles.Demo() : Load<Dataset>(Option("--dataset", "data/dataset.json"));
+    Dataset GetData() => command is "demo" or "cohort-demo" ? DataFiles.Demo() : Load<Dataset>(Option("--dataset", "data/dataset.json"));
     ResearchDb Db()
     {
         var connection = Environment.GetEnvironmentVariable("RESEARCH_DB") ?? throw new ArgumentException("Set RESEARCH_DB environment variable; never put secrets in files/arguments.");
@@ -32,6 +32,28 @@ try
     string ApiKey(string name) => Environment.GetEnvironmentVariable(name) ?? Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User) ?? throw new ArgumentException($"Set {name} as a local environment variable; never pass keys in CLI arguments.");
     switch (command)
     {
+        case "ai-explore":
+        case "ai-cohort":
+        {
+            var ai = Load<AiSettings>(Option("--ai-config", "config/ai.example.json")); ai.Validate();
+            var key = ApiKey("OPENAI_API_KEY"); var data = GetData();
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };
+            var client = new OpenAiHypotheses(http);
+            var result = await new AiResearchWorker(output).Run(data, settings.Plan, settings.Costs, settings.Risk, ai, code,
+                (input, ct) => client.Generate(key, ai, input, ct));
+            if (command == "ai-cohort" && result.Status == "REQUEST_BUDGET_EXHAUSTED" && result.Rounds.Length > 0)
+            {
+                var candidates = result.Rounds.SelectMany(r => r.Proposal.Output.Candidates).ToArray();
+                if (!data.Synthetic)
+                    new HoldoutRegistry("data/private/holdout-seals").Reserve(data, candidates, settings.Plan, settings.Costs, settings.Risk, code, "cohort", DateTimeOffset.UtcNow);
+                var cohort = new CohortAgent().Run(data, candidates, settings.Plan, settings.Costs, settings.Risk, code,
+                    result.Rounds.Max(r => r.Proposal.ReceivedAt));
+                var archivePath = store.Save("archive", cohort.Id, new ExperimentArchive(2, data, sourceSnapshot, Cohort: cohort, Ai: result));
+                Print(new { archivePath, cohort.Evaluation, cohort.DeclaredHypotheses, Note = "All generated candidates are counted; AI-created historical forward windows cannot establish prospective eligibility." }); break;
+            }
+            Print(new { result.Id, result.Status, Rounds = result.Rounds.Length, result.Note });
+            return result.Status is "GENERATION_FAILED" or "INPUT_BUDGET_EXCEEDED" or "REPEATED_CANDIDATE_REQUIRES_REVIEW" ? 2 : 0;
+        }
         case "reproduce":
         {
             var result = Load<ExperimentArchive>(Option("--archive", "")).Reproduce(sourceSnapshot);
@@ -91,14 +113,36 @@ try
             var result = await new OpenDartClient(http).Company(key, Option("--corp-code", ""));
             Print(new { path = store.Save("dart-company", Guid.NewGuid().ToString("N"), result), result.Company, result.StockCode }); break;
         }
+        case "cohort-demo":
+        case "cohort-research":
+        {
+            var data = GetData(); data.Validate();
+            if (!data.Synthetic)
+                new HoldoutRegistry("data/private/holdout-seals").Reserve(data, settings.Candidates, settings.Plan, settings.Costs, settings.Risk, code, "cohort", DateTimeOffset.UtcNow);
+            var result = new CohortAgent().Run(data, settings.Candidates, settings.Plan, settings.Costs, settings.Risk, code);
+            var archivePath = store.Save("archive", result.Id, new ExperimentArchive(2, data, sourceSnapshot, Cohort: result));
+            var path = store.Save("cohort", result.Id, result);
+            var reportPath = Path.Combine(output, $"cohort-{result.Id}.md");
+            using (var report = new StreamWriter(new FileStream(reportPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))) report.Write(ReportWriter.Markdown(result));
+            store.Save("dataset", data.Hash + "-" + result.Id, data);
+            store.Save("source", code + "-" + result.Id, sourceSnapshot);
+            if (args.Contains("--persist"))
+            {
+                await using var db = Db(); await db.SaveDataset(data); await db.SaveExperiment(result.Id, data.Hash, "cohort", code, result);
+            }
+            Print(new { path, archivePath, reportPath, result.Synthetic, result.Evaluation, result.DeclaredHypotheses,
+                Families = result.Families.Select(f => new { Family = f.Holdout.Strategies.Single().Family, f.Evaluation }),
+                Portfolio = result.Holdout.Metrics, Folds = result.Folds.Length,
+                Note = "One preregistered family-and-portfolio cohort; no independent evidence is created by repeating holdout calculations." }); break;
+        }
         case "demo":
         case "research":
         {
             var data = GetData(); data.Validate();
             if (!data.Synthetic)
             {
-                // One final holdout access per immutable dataset in this workspace. Preserve reservation even on failure.
-                new EvidenceStore("data/private/holdout-seals").Save("seal", data.Hash, new { data.Hash, settings, CodeVersion = code, Time = DateTimeOffset.UtcNow });
+                // Preserve all reserved sessions even on failure; data/hash changes cannot unlock inspected holdout.
+                new HoldoutRegistry("data/private/holdout-seals").Reserve(data, settings.Candidates, settings.Plan, settings.Costs, settings.Risk, code, "single", DateTimeOffset.UtcNow);
             }
             var result = new ResearchAgent().Run(data, settings.Candidates, settings.Plan, settings.Costs, settings.Risk, code);
             var archivePath = store.Save("archive", result.Id, new ExperimentArchive(1, data, sourceSnapshot, Research: result));
@@ -141,7 +185,7 @@ try
             var archives = evidencePaths.Select(path =>
             {
                 var archive = Load<ExperimentArchive>(path);
-                if (archive.Research == null) throw new ArgumentException("paper-start --evidence requires complete archive-ID.json files, not standalone research JSON.");
+                if (archive.Research == null && archive.Cohort == null) throw new ArgumentException("paper-start --evidence requires a complete cohort archive, not standalone result JSON.");
                 return archive;
             }).ToArray();
             var state = PaperEngine.Start(archives, GetData(), settings.Costs, settings.Risk, DateTimeOffset.UtcNow, sourceSnapshot);
@@ -184,10 +228,12 @@ try
                 Commands:
                   demo | import-csv --csv PATH --source SOURCE
                   backtest --dataset JSON | research --dataset JSON [--persist]
+                  cohort-demo | cohort-research --dataset JSON [--persist]
+                  ai-explore --dataset JSON --ai-config JSON | ai-cohort --dataset JSON --ai-config JSON
                   reproduce --archive JSON
                   reproduce-research --dataset JSON --evidence JSON --source-archive JSON
                   reproduce-backtest --dataset JSON --evidence JSON --source-archive JSON
-                  paper-start --dataset JSON --evidence 'archive-A.json;archive-B.json'
+                  paper-start --dataset JSON --evidence archive-COHORT.json
                   paper-step --state JSON --observation JSON | paper-recover --state JSON
                   paper-evaluate --state JSON
                   krx-fetch --market KOSPI|KOSDAQ --date DATE | krx-build --manifest JSON
