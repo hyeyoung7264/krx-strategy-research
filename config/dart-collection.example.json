@@ -1,0 +1,8 @@
+{
+  "Label": "20260928-sample-research-inputs",
+  "Queries": [
+    { "Kind": "FINANCIAL", "CorpCode": "00126380", "Year": 2025, "ReportCode": "11011", "StatementType": "CFS" },
+    { "Kind": "BUYBACK", "CorpCode": "00126380", "Start": "2026-09-01", "End": "2026-09-27" },
+    { "Kind": "CAPITAL_INCREASE", "CorpCode": "00126380", "Start": "2026-09-01", "End": "2026-09-27" }
+  ]
+}

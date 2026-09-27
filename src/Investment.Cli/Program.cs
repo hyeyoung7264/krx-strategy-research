@@ -97,6 +97,30 @@ try
             var data = KrxDatasetBuilder.Build(manifest.SnapshotFiles.Select(Load<KrxSnapshot>).ToArray(), manifest);
             Print(new { path = store.Save("dataset", data.Hash, data), data.PointInTimeCertified, Note = "Review corporate actions, historical universe, sector classification, publication timing and session calendar before certification." }); break;
         }
+        case "dart-collect":
+        {
+            var plan = Load<DartCollectionPlan>(Option("--plan", ""));
+            var sourceArchivePath = store.Save("dart-source", Guid.NewGuid().ToString("N"), sourceSnapshot);
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
+            var client = new OpenDartClient(http);
+            var result = await new DartCollector(Path.Combine(output, "dart-collections")).Run(plan,
+                int.Parse(Option("--max-requests", "3"), System.Globalization.CultureInfo.InvariantCulture),
+                TimeSpan.FromSeconds(double.Parse(Option("--interval-seconds", "1"), System.Globalization.CultureInfo.InvariantCulture)), code,
+                (query, ct) => client.Facts(ApiKey("OPENDART_API_KEY"), query, ct));
+            var path = store.Save("dart-run", result.Id, new { SourceArchivePath = sourceArchivePath, Receipt = result });
+            Print(new { path, result.Status, result.Attempts, result.HttpStatus, Snapshots = result.SnapshotFiles.Length,
+                Pending = result.Pending.Length, result.Note }); return result.Status is "REQUEST_FAILED" or "CANCELLED" ? 2 : 0;
+        }
+        case "dart-context":
+        {
+            var plan = Load<DartContextPlan>(Option("--plan", ""));
+            var facts = DartResearchIndex.At(plan.SnapshotFiles.Select(Load<DartFactSnapshot>).ToArray(),
+                plan.DisclosureFiles.Select(Load<DisclosureBatch>).ToArray(), plan.CorpCode, plan.Cutoff, DateTimeOffset.UtcNow);
+            var id = Guid.NewGuid().ToString("N");
+            var path = store.Save("dart-context", id, new { Id = id, CodeVersion = code, plan.CorpCode, plan.Cutoff, Facts = facts,
+                Note = "Research inputs only; unlinked or not-yet-observed facts excluded. No trading signal or return evidence." });
+            Print(new { path, Count = facts.Length }); break;
+        }
         case "dart-check":
         {
             var key = ApiKey("OPENDART_API_KEY"); var id = Guid.NewGuid().ToString("N");
@@ -252,6 +276,7 @@ try
                   krx-collect --plan JSON [--max-requests 5] [--interval-seconds 1]
                   dart-disclosures --start DATE --end DATE [--corp-code CODE] | dart-company --corp-code CODE
                   dart-check [--corp-code CODE]
+                  dart-collect --plan JSON [--max-requests 3] [--interval-seconds 1] | dart-context --plan JSON
                   db-schema | db-init | db-check
                 Source is checked against the compiled binary and archived automatically. Execution is virtual.
                 """); break;
@@ -267,3 +292,4 @@ catch (Exception ex)
 }
 
 internal sealed record Settings(Costs Costs, Risk Risk, ResearchPlan Plan, StrategySpec[] Candidates);
+internal sealed record DartContextPlan(string[] SnapshotFiles, string[] DisclosureFiles, string CorpCode, DateTimeOffset Cutoff);

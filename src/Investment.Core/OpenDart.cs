@@ -12,8 +12,12 @@ public sealed record DartPage(string Hash, string Json, DateTimeOffset ObservedA
 public sealed record DisclosureBatch(string Id, DateOnly Start, DateOnly End, Disclosure[] Disclosures, DartPage[] Pages,
     string Source = "https://opendart.fss.or.kr/api/list.json");
 public sealed record CompanySnapshot(string CorpCode, string Company, string StockCode, DateTimeOffset ObservedAt, string RawJson);
+public sealed class DartHttpException(int httpStatus) : InvalidOperationException($"OpenDART HTTP status {httpStatus}; no automatic retry.")
+{
+    public int HttpStatus { get; } = httpStatus;
+}
 
-public sealed class OpenDartClient(HttpClient http, Func<DateTimeOffset>? clock = null)
+public sealed partial class OpenDartClient(HttpClient http, Func<DateTimeOffset>? clock = null)
 {
     private DateTimeOffset Now => clock?.Invoke() ?? DateTimeOffset.UtcNow;
     public async Task<DisclosureBatch> Search(string apiKey, DateOnly start, DateOnly end, string? corpCode = null, CancellationToken ct = default)
@@ -56,10 +60,19 @@ public sealed class OpenDartClient(HttpClient http, Func<DateTimeOffset>? clock 
         // Fixed official host and read-only endpoints. No logging of URLs containing authentication keys.
         try
         {
-            using var response = await http.GetAsync(new Uri("https://opendart.fss.or.kr/api/" + path + "?" + query), ct);
-            if (response.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"OpenDART HTTP status {(int)response.StatusCode}; no automatic retry.");
-            var json = await response.Content.ReadAsStringAsync(ct);
-            if (json.Length > 5_000_000) throw new InvalidOperationException("OpenDART response too large.");
+            using var response = await http.GetAsync(new Uri("https://opendart.fss.or.kr/api/" + path + "?" + query), HttpCompletionOption.ResponseHeadersRead, ct);
+            if (response.StatusCode != HttpStatusCode.OK) throw new DartHttpException((int)response.StatusCode);
+            using var stream = await response.Content.ReadAsStreamAsync(ct);
+            using var body = new MemoryStream(); var buffer = new byte[8192];
+            while (true)
+            {
+                var count = await stream.ReadAsync(buffer, ct); if (count == 0) break;
+                if (body.Length + count > 5_000_000) throw new InvalidOperationException("OpenDART response too large.");
+                body.Write(buffer, 0, count);
+            }
+            var json = Encoding.UTF8.GetString(body.ToArray());
+            var secret = Uri.UnescapeDataString(query.Split('&')[0]["crtfc_key=".Length..]);
+            if (DartSecrets.Reflected(json, secret)) throw new InvalidOperationException("OpenDART response contains authentication material; not saved.");
             return json;
         }
         catch (HttpRequestException) { throw new InvalidOperationException("OpenDART network error; request URL redacted."); }
@@ -68,6 +81,7 @@ public sealed class OpenDartClient(HttpClient http, Func<DateTimeOffset>? clock 
     private static string Status(JsonElement root, bool allowNoData)
     {
         var status = root.GetProperty("status").GetString() ?? "missing";
+        if (status.Length != 3 || !status.All(char.IsAsciiDigit)) throw new InvalidOperationException("OpenDART invalid API status; response text redacted.");
         if (status != "000" && !(allowNoData && status == "013")) throw new InvalidOperationException($"OpenDART status {status}; failed collection, no automatic retry.");
         return status;
     }

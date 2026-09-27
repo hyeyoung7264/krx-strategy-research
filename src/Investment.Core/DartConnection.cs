@@ -53,7 +53,7 @@ public static class DartConnection
             }
             var bytes = body.ToArray(); hash = Convert.ToHexString(SHA256.HashData(bytes));
             var json = System.Text.Encoding.UTF8.GetString(bytes);
-            if (json.Contains(apiKey, StringComparison.Ordinal)) return Result("RESPONSE_CONTAINS_CREDENTIAL");
+            if (DartSecrets.Reflected(json, apiKey)) return Result("RESPONSE_CONTAINS_CREDENTIAL");
             using var document = JsonDocument.Parse(bytes); var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("status", out var apiCode) ||
                 apiCode.ValueKind != JsonValueKind.String) return Result("INVALID_RESPONSE");
