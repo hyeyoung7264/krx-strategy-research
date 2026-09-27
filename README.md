@@ -1,5 +1,7 @@
 # 한국 주식 Strategy Research / Paper Trading
 
+공개 저장소: [hyeyoung7264/krx-strategy-research](https://github.com/hyeyoung7264/krx-strategy-research). 현재 단계는 검증된 기반 구현이며 전체 목표는 미완료입니다. 남은 작업과 검증 범위는 [docs/status.md](docs/status.md)에 기록했습니다.
+
 우선 목표는 [docs/goal.md](docs/goal.md)에 기록했습니다. 일봉 신호로 다음 거래일 시가부터 수일 보유하는 C# 연구 시스템입니다. 실제 주문 기능은 없습니다. **현재 실제 시장의 양의 기대값이나 일평균 1%를 검증하지 않았습니다.**
 
 ## 실행

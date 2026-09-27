@@ -19,4 +19,4 @@
 
 가상 연구 기본값은 승인된 투자 정책이 아니다. 거래비용은 날짜/시장별 실제 요율을 사용자가 제공해야 한다. 비교용 기본값은 현실 수수료/세금에 관한 주장이 아니다.
 
-작업은 foundation / data / execution / validation / paper-evaluation의 5개 검토 단위로 나눈다. 원격 저장소가 없으므로 PR 생성이나 merge는 하지 않는다.
+작업은 foundation / data / execution / validation / paper-evaluation의 5개 검토 단위로 나눈다. Owner 요청에 따라 현재 기반 구현을 공개 GitHub 저장소 `hyeyoung7264/krx-strategy-research`에 게시한다. 공개 게시가 전체 목표 완료나 실전 유효성 검증을 의미하지 않는다. PR 생성과 merge는 이번 게시 범위에 포함하지 않는다.
