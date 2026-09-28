@@ -14,7 +14,8 @@ public sealed record KrxSnapshot(string Id, string Market, DateOnly Date, DateTi
 public sealed record UniverseRow(string Ticker, DateOnly Date, string Sector, bool Member, bool Tradable,
     DateTimeOffset AvailableAt, bool CorporateAction = false);
 public sealed record KrxManifest(string Version, string[] SnapshotFiles, DateOnly[] Sessions, UniverseRow[] Universe,
-    bool PointInTimeReviewed = false, string ReviewEvidence = "");
+    bool PointInTimeReviewed = false, string ReviewEvidence = "",
+    SecurityLifecycleEvent[]? LifecycleEvents = null);
 
 public sealed class KrxClient(HttpClient http, Func<DateTimeOffset>? clock = null)
 {
@@ -90,15 +91,18 @@ public static class KrxDatasetBuilder
         var bars = manifest.Universe.Select(u =>
         {
             if (!byKey.TryGetValue((u.Ticker, u.Date), out var row)) throw new ArgumentException("Universe security missing in KRX; do not drop suspended/delisted securities.");
-            if (row.Open is null or <= 0 || row.High is null or <= 0 || row.Low is null or <= 0 || row.Close is null or <= 0 || row.Volume == null || row.TradingValue == null)
+            var noTrade = row.Open == 0 && row.High == 0 && row.Low == 0 && row.Volume == 0 && row.TradingValue == 0;
+            var priced = row.Open is > 0 && row.High is > 0 && row.Low is > 0;
+            if (row.Close is null or <= 0 || row.Volume == null || row.TradingValue == null || !(priced || noTrade))
                 throw new ArgumentException("KRX missing prices need separately reviewed suspension/corporate-action handling; never invent OHLC.");
             var observed = snapshots.Single(s => s.Date == u.Date && s.Market == row.Market).ObservedAt;
             var usable = manifest.PointInTimeReviewed ? u.AvailableAt : observed > u.AvailableAt ? observed : u.AvailableAt;
             // SECT_TP_NM is a listing section, not an industry. Sector comes from historical universe evidence.
-            return new Bar(u.Ticker, u.Sector, u.Date, usable, row.Open.Value, row.High.Value, row.Low.Value, row.Close.Value,
+            return new Bar(u.Ticker, u.Sector, u.Date, usable, row.Open.GetValueOrDefault(), row.High.GetValueOrDefault(), row.Low.GetValueOrDefault(), row.Close.Value,
                 row.Volume.Value, row.TradingValue.Value, u.Tradable, u.Member, u.CorporateAction);
         }).OrderBy(b => b.Date).ThenBy(b => b.Ticker, StringComparer.Ordinal).ToArray();
-        var data = new Dataset("KRX approved API; manifest=" + manifest.Version + "; review=" + manifest.ReviewEvidence, false, manifest.PointInTimeReviewed, bars, manifest.Sessions);
+        var data = new Dataset("KRX approved API; manifest=" + manifest.Version + "; review=" + manifest.ReviewEvidence, false,
+            manifest.PointInTimeReviewed, bars, manifest.Sessions, manifest.LifecycleEvents);
         data.Validate(); return data;
     }
 }

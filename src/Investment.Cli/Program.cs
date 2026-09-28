@@ -78,6 +78,22 @@ try
             var result = await new KrxClient(http).Daily(key, Option("--market", "KOSPI"), DateOnly.Parse(Option("--date", "")));
             Print(new { path = store.Save("krx-raw", result.Id, result), Count = result.Rows.Length, Note = "Raw collection only; an empty result does not certify an exchange holiday." }); break;
         }
+        case "krx-basic-fetch":
+        {
+            var key = ApiKey("KRX_API_KEY");
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
+            var result = await new KrxReferenceClient(http).BasicInfo(key, Option("--market", "KOSPI"), DateOnly.Parse(Option("--date", "")));
+            Print(new { path = store.Save("krx-basic-raw", result.Id, result), Count = result.Rows.Length,
+                Note = "Unreviewed reference data only; listing section is not an industry and an empty response is not a certified holiday." }); break;
+        }
+        case "krx-index-fetch":
+        {
+            var key = ApiKey("KRX_API_KEY");
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
+            var result = await new KrxReferenceClient(http).IndexDaily(key, Option("--market", "KOSPI"), DateOnly.Parse(Option("--date", "")));
+            Print(new { path = store.Save("krx-index-raw", result.Id, result), Count = result.Rows.Length,
+                Note = "Unreviewed reference data only; select a declared index before comparing strategy returns." }); break;
+        }
         case "krx-collect":
         {
             var plan = Load<KrxCollectionPlan>(Option("--plan", ""));
@@ -273,6 +289,8 @@ try
                   paper-step --state JSON --observation JSON | paper-recover --state JSON
                   paper-evaluate --state JSON
                   krx-fetch --market KOSPI|KOSDAQ --date DATE | krx-build --manifest JSON
+                  krx-basic-fetch --market KOSPI|KOSDAQ --date DATE
+                  krx-index-fetch --market KOSPI|KOSDAQ --date DATE
                   krx-collect --plan JSON [--max-requests 5] [--interval-seconds 1]
                   dart-disclosures --start DATE --end DATE [--corp-code CODE] | dart-company --corp-code CODE
                   dart-check [--corp-code CODE]

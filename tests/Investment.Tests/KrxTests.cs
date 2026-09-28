@@ -43,6 +43,21 @@ public sealed class KrxTests
         Assert.Throws<ArgumentException>(() => KrxDatasetBuilder.Build([snapshot], manifest));
         Assert.Throws<ArgumentException>(() => KrxDatasetBuilder.Build([snapshot with { RawHash = "bad" }], manifest));
     }
+    [Fact] public void OfficialNoTradeRowKeepsReportedZerosAndPositiveRetainedClose()
+    {
+        var raw = Response.Replace("\"TDD_OPNPRC\":\"10,000\"", "\"TDD_OPNPRC\":\"0\"", StringComparison.Ordinal)
+            .Replace("\"TDD_HGPRC\":\"11,000\"", "\"TDD_HGPRC\":\"0\"", StringComparison.Ordinal)
+            .Replace("\"TDD_LWPRC\":\"9,000\"", "\"TDD_LWPRC\":\"0\"", StringComparison.Ordinal)
+            .Replace("\"ACC_TRDVOL\":\"1,000,000\"", "\"ACC_TRDVOL\":\"0\"", StringComparison.Ordinal)
+            .Replace("\"ACC_TRDVAL\":\"10,500,000,000\"", "\"ACC_TRDVAL\":\"0\"", StringComparison.Ordinal);
+        var snapshot = Snapshot() with { RawJson = raw,
+            RawHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw))),
+            Rows = KrxClient.Parse(raw, Date, "KOSPI") };
+        var manifest = new KrxManifest("no-trade-test", [], [Date], [new("005930", Date, "historical-industry", true, true, Clock.Close(Date))]);
+        var bar = Assert.Single(KrxDatasetBuilder.Build([snapshot], manifest).Bars);
+        Assert.Equal(0, bar.Open); Assert.Equal(0, bar.High); Assert.Equal(0, bar.Low);
+        Assert.Equal(10500, bar.Close); Assert.Equal(0, bar.Volume);
+    }
     [Fact] public async Task RequestUsesOfficialHttpsEndpointAndHeaderAuthentication()
     {
         var handler = new FakeHandler(); using var http = new HttpClient(handler);

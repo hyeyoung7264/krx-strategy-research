@@ -54,7 +54,7 @@ dotnet run --project src/Investment.Cli --no-restore -- research --dataset artif
 dotnet run --project src/Investment.Cli --no-restore -- cohort-research --dataset artifacts/dataset-HASH.json
 ```
 
-날짜 형식은 `yyyy-MM-dd`, AvailableAt에는 명시적 timezone이 필요합니다. Member/섹터/거래 가능 상태는 해당 거래일 당시 자료여야 합니다. 모든 종목에 같은 세션 grid가 필요하며 거래정지·퇴출 행을 누락하지 않습니다. 상장 전/폐지 후 placeholder를 사용하는 경우 실제 잔여 가격·회수·거래 상태 처리를 검토해야 합니다. 날짜를 임의로 채워 만든 종목이나 잔여 가치를 실제 데이터로 인증하면 안 됩니다.
+날짜 형식은 `yyyy-MM-dd`, AvailableAt에는 명시적 timezone이 필요합니다. Member/섹터/거래 가능 상태는 해당 거래일 당시 자료여야 합니다. 상장된 기간에는 거래정지·무거래 행까지 매 세션 보존합니다. 상장 전과 폐지 후의 행은 만들지 않고, 종목이 나타나거나 사라지는 경계에는 출처와 공개시각을 가진 `LifecycleEvents`를 요구합니다. 보유 종목이 폐지 등으로 가격 없이 사라지면 회수·권리 처리 증거가 없는 백테스트를 중단합니다. 날짜를 임의로 채워 만든 종목이나 잔여 가치를 실제 데이터로 인증하면 안 됩니다.
 
 CSV 수입은 `PointInTimeCertified=false`로 생성됩니다. 인증은 데이터 품질·역사적 universe·수정주가·시점·공식 거래일 캘린더의 별도 검토가 필요합니다. 인증된 JSON에는 `Sessions`에 실제 거래일을 순서대로 명시해야 합니다. 단순히 flag를 바꾸면 품질이 검증되는 것은 아닙니다. `CorporateAction=true`인 자료는 명시적인 주식수/가격 조정 구현 전까지 거부합니다.
 
@@ -135,12 +135,14 @@ Regime은 과거 20세션의 연속 구성종목 equal-weight 가격 변화 prox
 Owner가 가격 공급원으로 KRX를 선택했습니다. [공식 유가증권 일별매매정보](https://openapi.krx.co.kr/contents/OPP/USES/service/OPPUSES002_S2.cmd?BO_ID=JvJFzlAENzZlPBDNGAWC)와 [코스닥 일별매매정보](https://openapi.krx.co.kr/contents/OPP/USES/service/OPPUSES002_S2.cmd?BO_ID=hZjGpkllgCBCWqeTsYFj)의 개발 명세를 확인하여 구현했습니다. 공식 HTTPS 경로에 GET 요청, `AUTH_KEY` 헤더 인증, `basDd=yyyyMMdd` 인자를 사용합니다. [인증키와 각 서비스 활용 승인](https://openapi.krx.co.kr/contents/OPP/INFO/OPPINFO003.jsp) 후 `KRX_API_KEY` 환경변수를 설정해야 합니다.
 
 ```powershell
-dotnet run --project src/Investment.Cli --no-restore -- krx-fetch --market KOSPI --date 2026-09-25
-dotnet run --project src/Investment.Cli --no-restore -- krx-fetch --market KOSDAQ --date 2026-09-25
+dotnet run --project src/Investment.Cli --no-restore -- krx-fetch --market KOSPI --date 2026-09-23
+dotnet run --project src/Investment.Cli --no-restore -- krx-fetch --market KOSDAQ --date 2026-09-23
+dotnet run --project src/Investment.Cli --no-restore -- krx-basic-fetch --market KOSPI --date 2026-09-23
+dotnet run --project src/Investment.Cli --no-restore -- krx-index-fetch --market KOSPI --date 2026-09-23
 dotnet run --project src/Investment.Cli --no-restore -- krx-build --manifest config/my-reviewed-manifest.json
 ```
 
-`krx-fetch`는 전체 시장 원본과 SHA-256, 조회 시각, 종목명, OHLCV, 거래대금, 시가총액, 상장주식수를 보존합니다. 한 번에 한 거래일만 조회합니다. 빈 응답을 거래소 휴장일로 단정하지 않습니다. placeholder `-`는 누락값이며 0이나 전일 가격으로 바꾸지 않습니다.
+`krx-fetch`는 전체 시장 원본과 SHA-256, 조회 시각, 종목명, OHLCV, 거래대금, 시가총액, 상장주식수를 보존합니다. `krx-basic-fetch`는 날짜별 종목기본정보, `krx-index-fetch`는 이름이 구분된 지수 일별시세 원본을 보존합니다. 각 서비스는 별도 승인이 필요합니다. 한 번에 한 거래일만 조회합니다. 빈 응답을 거래소 휴장일로 단정하지 않습니다. placeholder `-`는 누락값이며 0이나 전일 가격으로 바꾸지 않습니다. KRX의 거래량 0·시고저가 0·잔존 종가 행은 원문대로 보존하고 0원 시가 체결을 금지합니다. [실제 응답의 초기 품질 감사](docs/krx-data-audit.md)를 참조하세요.
 
 여러 날짜의 원본을 수집하려면 `KrxCollectionPlan` JSON에 시장과 중복 없이 오름차순인 날짜 목록을 명시합니다. `config/krx-collection.example.json`은 요청 형식 예시이며 실제 거래일을 인증하지 않습니다. 주말을 제외해 자동 생성한 달력을 연구용 거래일로 사용하지 않습니다.
 
@@ -152,7 +154,7 @@ dotnet run --project src/Investment.Cli --no-restore -- krx-collect --plan confi
 
 한 계획의 동시 실행은 파일 lease로 거부합니다. 오류는 자동 재시도하지 않으며 앞서 성공한 원본과 키/예외 메시지를 제외한 수집 receipt를 남깁니다. 빈 응답은 원본을 보존하고 `EMPTY_RESPONSE_REQUIRES_REVIEW`로 중단합니다. 재실행해도 그 날짜를 완료 처리하거나 다음 날짜로 건너뛰지 않습니다. 요청 날짜/시장/관측 시점/원본 해시/정규화 결과가 맞지 않는 저장 자료는 덮어쓰거나 재조회하지 않고 거부합니다. 원본 수집의 `COLLECTED_UNREVIEWED`는 품질·시점 인증이나 dataset 생성 완료를 의미하지 않습니다. receipt의 `SnapshotFiles`를 검토한 manifest에 사용해야 합니다.
 
-`config/krx-manifest.example.json`은 형식 예시이며 역사적 사실을 인증하는 파일이 아닙니다. SnapshotFiles, 실제 거래 세션, 날짜별 universe·산업 섹터·거래 가능 상태·공개시각, 품질 검토 증거를 채워야 합니다. 예시 공개시각 08:00은 승인된 가격 공개 계약이 아니며 공급원 검증이 필요합니다. KRX의 소속부(`SECT_TP_NM`)는 산업 섹터가 아닙니다. 원본이나 파싱 결과가 바뀌었거나 선택 종목이 빠졌으면 dataset 생성을 거부합니다.
+`config/krx-manifest.example.json`은 형식 예시이며 역사적 사실을 인증하는 파일이 아닙니다. SnapshotFiles, 실제 거래 세션, 날짜별 universe·산업 섹터·거래 가능 상태·공개시각, 품질 검토 증거를 채워야 합니다. 신규상장·상장폐지 경계에는 `LifecycleEvents`의 `Ticker`, `Date`, `Kind`(`LISTED`/`DELISTED`), `AvailableAt`, `Evidence`를 추가합니다. 상장 중간의 누락 행은 여전히 거부하며, 인증 자료에서는 사건 공개시각이 해당 거래일 시가보다 늦으면 거부합니다. 예시 공개시각 08:00은 승인된 가격 공개 계약이 아니며 공급원 검증이 필요합니다. KRX의 소속부(`SECT_TP_NM`)는 산업 섹터가 아닙니다. 원본이나 파싱 결과가 바뀌었거나 선택 종목이 빠졌으면 dataset 생성을 거부합니다.
 
 미검토 자료의 공개시각은 실제 관측시각보다 앞당기지 않습니다. 역사적 공개 계약/원본을 검토해 인증한 뒤에만 과거 시점 입력으로 사용할 수 있습니다. 신호는 체결 시가 직전까지 공개된 이전 세션의 bar만 봅니다. 종가 직후 공개되는 공급원과 다음날 아침 공개되는 공급원을 구분합니다. 전일 bar가 다음날 시가 이후 공개되면 해당 시가 거래에 사용할 수 없습니다.
 

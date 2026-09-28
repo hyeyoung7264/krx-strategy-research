@@ -69,6 +69,30 @@ public sealed class EngineTests
         var trade = Assert.Single(Run(data).Trades);
         Assert.Equal(data.Dates[7], DateOnly.FromDateTime(trade.ExitTime.DateTime));
     }
+    [Fact] public void OfficialNoTradeZerosCannotBecomeOpeningFillsOrOpeningLosses()
+    {
+        var data = Prices(100, 101, 102, 110, 110, 112, 113, 114);
+        data = data with { Bars = data.Bars.Select((b, i) => i == 4 ? b with
+            { Open = 0, High = 0, Low = 0, Close = 110, Volume = 0, TradingValue = 0 } : b).ToArray() };
+        data.Validate();
+        var result = Run(data);
+        Assert.DoesNotContain(result.Events, e => e.Contains("RISK_LIMIT"));
+        Assert.All(result.Trades, trade => Assert.True(trade.EntryPrice > 0 && trade.ExitPrice > 0));
+        Assert.Equal(data.Dates[5], DateOnly.FromDateTime(Assert.Single(result.Trades).ExitTime.DateTime));
+
+        // A same-day retained close is unavailable at the open even in malformed synthetic input.
+        var changed = data with { Bars = data.Bars.Select((b, i) => i == 4 ? b with { Close = 90 } : b).ToArray() };
+        var stressed = Run(changed, risk: Limits with { DailyLoss = .01m });
+        Assert.DoesNotContain(stressed.Events, e => e.Contains("OPEN_RISK_LIMIT"));
+        Assert.Contains(stressed.Events, e => e.Contains("CLOSE_RISK_LIMIT"));
+    }
+    [Fact] public void PartialZeroOhlcIsNotAcceptedAsNoTrade()
+    {
+        var data = Prices(100, 101, 102);
+        var malformed = data with { Bars = data.Bars.Select((b, i) => i == 1 ? b with
+            { Open = 0, High = 0, Low = 0, Volume = 1, TradingValue = 100 } : b).ToArray() };
+        Assert.Throws<ArgumentException>(() => malformed.Validate());
+    }
     [Fact] public void ExitParticipationBudgetProducesPartialExecutionsWithoutInflatingTradeCount()
     {
         var data = Prices(100, 101, 102, 110, 111, 112, 113, 114);
@@ -84,6 +108,46 @@ public sealed class EngineTests
         var data = DataFiles.Demo(10);
         Assert.Throws<ArgumentException>(() => (data with { Bars = data.Bars.Skip(1).ToArray() }).Validate());
         Assert.Throws<ArgumentException>(() => (data with { Bars = data.Bars.Append(data.Bars[0]).ToArray() }).Validate());
+    }
+    [Fact] public void NewListingNeedsAnExplicitTimelyLifecycleEvent()
+    {
+        var data = Prices(100, 101, 102, 103);
+        var listed = data.Dates[2];
+        var newBars = data.Bars.Where(b => b.Date >= listed).Select(b => b with { Ticker = "B" });
+        var sparse = data with { Bars = data.Bars.Concat(newBars).ToArray(), Sessions = data.Dates };
+        Assert.Throws<ArgumentException>(() => sparse.Validate());
+        var documented = sparse with { LifecycleEvents = [new("B", listed, "LISTED", Clock.Open(listed).AddHours(-1), "listing-notice")] };
+        documented.Validate();
+        (documented with { PointInTimeCertified = true }).Validate();
+        Assert.Throws<ArgumentException>(() => (documented with { Bars = documented.Bars.Where(b => b.Ticker != "B" || b.Date != data.Dates[3]).ToArray() }).Validate());
+        Assert.Throws<ArgumentException>(() => (documented with { PointInTimeCertified = true,
+            LifecycleEvents = [new("B", listed, "LISTED", Clock.Close(listed), "late-notice")] }).Validate());
+        Assert.DoesNotContain("\"LifecycleEvents\"", System.Text.Json.JsonSerializer.Serialize(data));
+    }
+    [Fact] public void DelistedHoldingWithoutSettlementStopsBacktest()
+    {
+        var original = Prices(100, 101, 102, 110, 111, 112, 113);
+        var delisted = original.Dates[4];
+        var companion = original.Bars.Select(b => b with { Ticker = "B", Close = 100, Open = 100, High = 101, Low = 99 }).ToArray();
+        var data = original with { Bars = original.Bars.Where(b => b.Date < delisted).Concat(companion).ToArray(),
+            Sessions = original.Dates,
+            LifecycleEvents = [new("A", delisted, "DELISTED", Clock.Open(delisted).AddHours(-1), "delisting-notice")] };
+        data.Validate();
+        Assert.Throws<InvalidOperationException>(() => Run(data));
+    }
+    [Fact] public void RelistedTickerDoesNotReuseItsEarlierPriceHistory()
+    {
+        var original = Prices(100, 110, 120, 100, 100, 110, 120, 130, 140);
+        var dates = original.Dates;
+        var activeBars = original.Bars.Where(b => b.Date != dates[3]).ToArray();
+        var companion = original.Bars.Select(b => b with { Ticker = "B", Open = 100, High = 101, Low = 99, Close = 100 }).ToArray();
+        var data = original with { Bars = activeBars.Concat(companion).ToArray(), Sessions = dates,
+            LifecycleEvents = [new("A", dates[3], "DELISTED", Clock.Open(dates[3]).AddHours(-1), "delisting-notice"),
+                new("A", dates[4], "LISTED", Clock.Open(dates[4]).AddHours(-1), "new-listing-notice")] };
+        var run = Run(data);
+        Assert.Equal(0, run.Equity.Single(e => e.Date == dates[5]).Exposure);
+        Assert.Equal(0, run.Equity.Single(e => e.Date == dates[6]).Exposure);
+        Assert.True(run.Equity.Single(e => e.Date == dates[7]).Exposure > 0);
     }
     [Fact] public void CorporateActionsFailClosedInsteadOfFakingAdjustedPrices()
     {

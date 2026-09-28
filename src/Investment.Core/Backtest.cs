@@ -22,6 +22,8 @@ public sealed class BacktestEngine
         if (start > end || !dates.Contains(start) || !dates.Contains(end)) throw new ArgumentException("Invalid period.");
         var byDate = data.Bars.GroupBy(b => b.Date).ToDictionary(g => g.Key, g => g.OrderBy(b => b.Ticker, StringComparer.Ordinal).ToArray());
         var history = data.Bars.GroupBy(b => b.Ticker).ToDictionary(g => g.Key, g => g.OrderBy(b => b.Date).ToArray());
+        var listings = (data.LifecycleEvents ?? []).Where(e => e.Kind == "LISTED")
+            .GroupBy(e => e.Ticker).ToDictionary(g => g.Key, g => g.Select(e => e.Date).Order().ToArray());
         var holdings = new List<Position>(); var trades = new List<Trade>(); var curve = new List<EquityPoint>(); var events = new List<string>();
         decimal cash = initial, previous = initial, peak = initial, turnover = 0;
         bool halted = false; string? baselineRegime = null;
@@ -29,6 +31,8 @@ public sealed class BacktestEngine
         for (var i = first; i <= last; i++)
         {
             var date = dates[i]; var today = byDate[date]; var map = today.ToDictionary(b => b.Ticker);
+            if (holdings.Any(p => !map.ContainsKey(p.EntryBar.Ticker)))
+                throw new InvalidOperationException("Held security disappeared without a verified settlement or corporate-action valuation; backtest stopped.");
             var prior = i == 0 ? null : byDate[dates[i - 1]];
             var decisionTime = Clock.Open(date).AddTicks(-1);
             var regime = Regime(data, i - 1, decisionTime);
@@ -38,6 +42,13 @@ public sealed class BacktestEngine
 
             decimal Mark(Func<Bar, decimal> price) => cash + holdings.Sum(p => p.Quantity * price(map[p.EntryBar.Ticker]));
             decimal LiquidationMark() => cash + holdings.Sum(p => p.Quantity * map[p.EntryBar.Ticker].Close * (1 - costs.Slippage) * (1 - costs.Commission - costs.SellTax));
+            decimal OpeningMark(Bar b)
+            {
+                if (b.Open > 0) return b.Open;
+                // A missing opening print cannot be valued at zero or today's not-yet-known close.
+                var known = history[b.Ticker].LastOrDefault(p => p.Date < date && p.AvailableAt <= decisionTime);
+                return known?.Close ?? throw new InvalidOperationException("No published prior close for opening valuation.");
+            }
             var liquidityUsed = new Dictionary<string, int>();
             int RemainingLiquidity(string ticker)
             {
@@ -66,7 +77,7 @@ public sealed class BacktestEngine
             }
             // Tradable must represent point-in-time execution eligibility (including suspension/limit locks).
             // Never infer an opening fill decision from the future full-session high/low/volume.
-            bool Executable(Bar b) => b.Tradable;
+            bool Executable(Bar b) => b.Tradable && b.Open > 0;
             foreach (var p in holdings.ToArray())
             {
                 var b = map[p.EntryBar.Ticker];
@@ -76,7 +87,7 @@ public sealed class BacktestEngine
                 else if (b.Open <= p.Price * (1 - risk.StopLoss)) Exit(p, b.Open, "gap-stop");
             }
 
-            var openingEquity = Mark(b => b.Open);
+            var openingEquity = Mark(OpeningMark);
             if (openingEquity / previous - 1 <= -risk.DailyLoss || 1 - openingEquity / peak >= risk.Drawdown)
             {
                 halted = true; events.Add($"{date:yyyy-MM-dd}: OPEN_RISK_LIMIT; gaps can exceed limits");
@@ -90,22 +101,26 @@ public sealed class BacktestEngine
                 {
                     // No same-day OHLCV or membership is exposed to the signal generator.
                     var now = decisionTime;
-                    var past = history[ticker].Where(b => b.Date <= dates[i - 1] && b.AvailableAt <= now).ToArray();
+                    // A reused ticker starts a new history at its latest listing event.
+                    var latestListing = listings.TryGetValue(ticker, out var listingDates)
+                        ? listingDates.Where(d => d <= dates[i - 1]).DefaultIfEmpty(DateOnly.MinValue).Max()
+                        : DateOnly.MinValue;
+                    var past = history[ticker].Where(b => b.Date >= latestListing && b.Date <= dates[i - 1] && b.AvailableAt <= now).ToArray();
                     if (past.Length == 0 || past[^1].Date != dates[i - 1]) continue;
                     var signal = new PriceStrategy(spec).Generate(past, now);
                     if (signal != null) candidates.Add((spec, signal));
                 }
                 foreach (var candidate in candidates.OrderByDescending(c => c.Signal.Score).ThenBy(c => c.Spec.Id, StringComparer.Ordinal).ThenBy(c => c.Signal.Ticker, StringComparer.Ordinal))
                 {
-                    var b = map[candidate.Signal.Ticker];
+                    if (!map.TryGetValue(candidate.Signal.Ticker, out var b)) continue;
                     // Today's volume is NOT used to size an open fill. Capacity uses the previously published bar.
                     if (!b.Member || !Executable(b) || holdings.Any(p => p.Strategy.Id == candidate.Spec.Id && p.EntryBar.Ticker == b.Ticker)) continue;
                     var price = b.Open * (1 + costs.Slippage);
-                    var equity = Mark(x => x.Open);
-                    var exposure = holdings.Sum(p => p.Quantity * map[p.EntryBar.Ticker].Open);
-                    var strategyExposure = holdings.Where(p => p.Strategy.Id == candidate.Spec.Id).Sum(p => p.Quantity * map[p.EntryBar.Ticker].Open);
-                    var sectorExposure = holdings.Where(p => map[p.EntryBar.Ticker].Sector == b.Sector).Sum(p => p.Quantity * map[p.EntryBar.Ticker].Open);
-                    var tickerExposure = holdings.Where(p => p.EntryBar.Ticker == b.Ticker).Sum(p => p.Quantity * map[p.EntryBar.Ticker].Open);
+                    var equity = Mark(OpeningMark);
+                    var exposure = holdings.Sum(p => p.Quantity * OpeningMark(map[p.EntryBar.Ticker]));
+                    var strategyExposure = holdings.Where(p => p.Strategy.Id == candidate.Spec.Id).Sum(p => p.Quantity * OpeningMark(map[p.EntryBar.Ticker]));
+                    var sectorExposure = holdings.Where(p => map[p.EntryBar.Ticker].Sector == b.Sector).Sum(p => p.Quantity * OpeningMark(map[p.EntryBar.Ticker]));
+                    var tickerExposure = holdings.Where(p => p.EntryBar.Ticker == b.Ticker).Sum(p => p.Quantity * OpeningMark(map[p.EntryBar.Ticker]));
                     var capacity = new[] { cash / (1 + costs.Commission), equity * risk.PositionCap - tickerExposure,
                         equity * risk.StrategyCap - strategyExposure, equity * risk.ExposureCap - exposure,
                         equity * risk.SectorCap - sectorExposure }.Min();
@@ -142,7 +157,7 @@ public sealed class BacktestEngine
         // Point-in-time equal-weight proxy, using only continuously present members in the trailing window.
         var end = dates[throughIndex]; var begin = dates[throughIndex - 20]; var now = knownAt ?? Clock.Close(end);
         var moves = data.Bars.Where(b => b.Date >= begin && b.Date <= end).GroupBy(b => b.Ticker)
-            .Where(g => g.Count() == 21 && g.All(b => b.Member && b.Tradable && b.AvailableAt <= now))
+            .Where(g => g.Count() == 21 && g.All(b => b.Member && b.Tradable && b.Volume > 0 && b.AvailableAt <= now))
             .Select(g => { var a = g.OrderBy(b => b.Date).ToArray(); return a[^1].Close / a[0].Close - 1; }).ToArray();
         if (moves.Length == 0) return "unknown";
         var average = moves.Average();
