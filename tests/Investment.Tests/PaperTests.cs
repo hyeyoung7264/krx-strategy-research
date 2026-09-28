@@ -92,6 +92,28 @@ public sealed class PaperTests
         Assert.Single(closed.Equity); Assert.Equal(10009, closed.Equity[0].Equity);
         Assert.Throws<ArgumentException>(() => PaperEngine.Step(opened, e with { ClosedBars = [] }, time));
     }
+    [Fact] public void PaperCloseAcceptsObservedNewListingAndCarriesItsHistory()
+    {
+        var opened = PaperEngine.Step(Empty() with { PendingSignals = [] }, Event("open", Open, 110), Open);
+        var time = Clock.Close(Day);
+        var first = new Bar("A", "s", Day, time, 110, 112, 109, 111, 100000, 11100000, true, true);
+        var listed = new Bar("B", "s", Day, time, 100, 101, 99, 100, 100000, 10000000, true, true);
+        var close = Event("close", time, 111) with { ClosedBars = [first, listed],
+            LifecycleEvents = [new("B", Day, "LISTED", time, "observed-listing-notice")] };
+        Assert.Throws<ArgumentException>(() => PaperEngine.Step(opened, close with { LifecycleEvents = null }, time));
+        var after = PaperEngine.Step(opened, close, time);
+        Assert.Equal(2, after.History.Count(b => b.Date == Day));
+        Assert.Single(after.LifecycleEvents!);
+        Assert.DoesNotContain(after.PendingSignals, s => s.Ticker == "B");
+    }
+    [Fact] public void PaperCannotEraseAHeldSecurityOnDelisting()
+    {
+        var opened = PaperEngine.Step(Empty(), Event("open", Open, 110), Open);
+        var time = Clock.Close(Day);
+        var close = Event("close", time, 110) with { ClosedBars = [new("B", "s", Day, time, 100, 101, 99, 100, 100000, 10000000, true, true)],
+            LifecycleEvents = [new("A", Day, "DELISTED", time, "notice"), new("B", Day, "LISTED", time, "notice")] };
+        Assert.Throws<InvalidOperationException>(() => PaperEngine.Step(opened, close, time));
+    }
     [Fact] public void PaperJournalRecoversCommittedTransitionWithoutExecutingTwice()
     {
         var root = Path.Combine(Path.GetTempPath(), "paper-journal-" + Guid.NewGuid().ToString("N"));

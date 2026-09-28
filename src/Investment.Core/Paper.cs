@@ -5,7 +5,9 @@ using System.Text.Json;
 namespace Investment.Core;
 
 public sealed record Quote(string Ticker, string Sector, DateTimeOffset Time, decimal Bid, decimal Ask, bool Tradable);
-public sealed record Observation(string Source, string Kind, DateTimeOffset ObservedAt, Quote[] Quotes, Bar[] ClosedBars, bool VerifiedFeed = false);
+public sealed record Observation(string Source, string Kind, DateTimeOffset ObservedAt, Quote[] Quotes, Bar[] ClosedBars, bool VerifiedFeed = false,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    SecurityLifecycleEvent[]? LifecycleEvents = null);
 public interface IObservationFeed { Task<Observation> Observe(CancellationToken cancellationToken); }
 public sealed record PaperPosition(StrategySpec Strategy, Signal Signal, DateTimeOffset EntryTime, decimal EntryPrice,
     int Quantity, decimal Paid, decimal StopLoss, string Sector);
@@ -16,7 +18,9 @@ public sealed record PaperState(string SessionId, string[] ResearchEvidenceIds, 
     DateTimeOffset LastObservation, string? BaselineRegime, bool Halted, bool VerifiedFeed,
     Bar[] History, Signal[] PendingSignals, PaperPosition[] Positions, PaperFill[] Fills,
     EquityPoint[] Equity, PaperAudit[] Audit, decimal Turnover, Dictionary<string, int>? LiquidityUsed = null, string CodeVersion = "",
-    int ResearchCandidateCount = 0, string CohortEvidenceId = "");
+    int ResearchCandidateCount = 0, string CohortEvidenceId = "",
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    SecurityLifecycleEvent[]? LifecycleEvents = null);
 
 public static class PaperEngine
 {
@@ -65,11 +69,12 @@ public static class PaperEngine
         if (cohort == null) throw new ArgumentException("Independent winning results require joint portfolio validation; use a complete cohort archive.");
         if (cohort.Holdout.Costs != costs || cohort.Holdout.Risk != risk || cohort.Holdout.CodeVersion != codeVersion ||
             !cohort.Holdout.Strategies.SequenceEqual(specs)) throw new ArgumentException("Cohort portfolio settings/version mismatch.");
-        var signals = Signals(history.Bars, specs, now);
+        var signals = Signals(history.Bars, specs, now, history.LifecycleEvents);
         return new(Guid.NewGuid().ToString("N"), new[] { cohort.Id }.Concat(evidence.Select(e => e.Id)).ToArray(), specs, costs, risk, initial, initial,
             initial, initial, null, now, BacktestEngine.Regime(history, history.Dates.Length - 1, now), false, false,
             history.Bars, signals, [], [], [], [], 0, CodeVersion: codeVersion,
-            ResearchCandidateCount: cohort.DeclaredHypotheses, CohortEvidenceId: cohort.Id);
+            ResearchCandidateCount: cohort.DeclaredHypotheses, CohortEvidenceId: cohort.Id,
+            LifecycleEvents: history.LifecycleEvents);
     }
 
     public static PaperState Step(PaperState state, Observation observation, DateTimeOffset now)
@@ -101,22 +106,44 @@ public static class PaperEngine
         var peak = Math.Max(state.Peak, equity);
         if (equity / dayStart - 1 <= -risk.DailyLoss || 1 - equity / peak >= risk.Drawdown)
         { halted = true; actions.Add("PORTFOLIO_RISK_HALT"); }
-        var history = state.History; var baseline = state.BaselineRegime;
+        var history = state.History; var lifecycle = state.LifecycleEvents; var baseline = state.BaselineRegime;
         var pending = state.PendingSignals;
         if (observation.Kind == "close")
         {
             var bars = observation.ClosedBars;
             if (bars.Length == 0 || bars.Any(b => b.Date != date || b.AvailableAt > observation.ObservedAt) || bars.Select(b => b.Ticker).Distinct().Count() != bars.Length)
                 throw new ArgumentException("Invalid close bars.");
-            if (!bars.Select(b => b.Ticker).Order().SequenceEqual(history.Select(b => b.Ticker).Distinct().Order())) throw new ArgumentException("Incomplete close universe.");
+            if (history.Length == 0) throw new ArgumentException("Missing paper seed history.");
+            var previousDate = history.Max(b => b.Date);
+            var expected = history.Where(b => b.Date == previousDate).Select(b => b.Ticker).ToHashSet(StringComparer.Ordinal);
+            var changes = observation.LifecycleEvents ?? [];
+            foreach (var change in changes)
+            {
+                if (change.Date != date || change.AvailableAt > observation.ObservedAt || string.IsNullOrWhiteSpace(change.Evidence))
+                    throw new ArgumentException("Invalid or unobserved paper lifecycle event.");
+                if (change.Kind == "LISTED")
+                {
+                    if (!expected.Add(change.Ticker)) throw new ArgumentException("Duplicate paper listing.");
+                }
+                else if (change.Kind == "DELISTED")
+                {
+                    if (!expected.Remove(change.Ticker) || positions.Any(p => p.Signal.Ticker == change.Ticker))
+                        throw new InvalidOperationException("Delisted held security requires verified settlement; paper stopped.");
+                }
+                else throw new ArgumentException("Unknown paper lifecycle event.");
+            }
+            if (!bars.Select(b => b.Ticker).ToHashSet(StringComparer.Ordinal).SetEquals(expected))
+                throw new ArgumentException("Incomplete close universe or missing lifecycle event.");
             history = history.Concat(bars).ToArray();
-            var data = new Dataset(observation.Source, false, false, history); data.Validate();
+            if (changes.Length != 0) lifecycle = (lifecycle ?? []).Concat(changes).ToArray();
+            var data = new Dataset(observation.Source, false, false, history, LifecycleEvents: lifecycle); data.Validate();
             var regime = BacktestEngine.Regime(data, data.Dates.Length - 1);
             if (baseline == "unknown" || baseline == null) baseline = regime;
             else if (regime != baseline) { halted = true; actions.Add($"REGIME_CHANGE:{baseline}->{regime}"); }
-            pending = halted ? [] : Signals(history, state.Strategies, observation.ObservedAt);
+            pending = halted ? [] : Signals(history, state.Strategies, observation.ObservedAt, lifecycle);
         }
-        else if (observation.ClosedBars.Length != 0) throw new ArgumentException("Close bars may only arrive with close event.");
+        else if (observation.ClosedBars.Length != 0 || observation.LifecycleEvents is { Length: > 0 })
+            throw new ArgumentException("Close bars and lifecycle events may only arrive with close event.");
         foreach (var p in positions.ToArray())
         {
             var q = map[p.Signal.Ticker]; if (!q.Tradable) { actions.Add($"UNFILLABLE:{q.Ticker}"); continue; }
@@ -169,12 +196,20 @@ public static class PaperEngine
         var audit = state.Audit.Append(new PaperAudit(state.Audit.Length, previousHash, hash, observation, actions.ToArray())).ToArray();
         // File ingress cannot attest a feed; even an asserted VerifiedFeed flag is not trusted.
         return state with { Cash = cash, Peak = peak, DayStartEquity = dayStart, TradingDate = date, LastObservation = observation.ObservedAt,
-            BaselineRegime = baseline, Halted = halted, VerifiedFeed = false, History = history, PendingSignals = pending,
+            BaselineRegime = baseline, Halted = halted, VerifiedFeed = false, History = history, LifecycleEvents = lifecycle, PendingSignals = pending,
             Positions = positions.ToArray(), Fills = fills.ToArray(), Equity = curve, Audit = audit, Turnover = turnover, LiquidityUsed = liquidityUsed };
     }
-    private static Signal[] Signals(Bar[] bars, StrategySpec[] specs, DateTimeOffset now) => specs
-        .SelectMany(spec => bars.GroupBy(b => b.Ticker).Select(g => new PriceStrategy(spec).Generate(g.Where(b => b.AvailableAt <= now).OrderBy(b => b.Date).ToArray(), now)))
-        .Where(s => s != null).Cast<Signal>().ToArray();
+    private static Signal[] Signals(Bar[] bars, StrategySpec[] specs, DateTimeOffset now, SecurityLifecycleEvent[]? lifecycle)
+    {
+        var latestSession = bars.Max(b => b.Date);
+        var listings = (lifecycle ?? []).Where(e => e.Kind == "LISTED").GroupBy(e => e.Ticker)
+            .ToDictionary(g => g.Key, g => g.Max(e => e.Date));
+        return specs.SelectMany(spec => bars.GroupBy(b => b.Ticker)
+                .Where(g => g.Max(b => b.Date) == latestSession)
+                .Select(g => new PriceStrategy(spec).Generate(g.Where(b => b.Date >= listings.GetValueOrDefault(g.Key, DateOnly.MinValue) && b.AvailableAt <= now)
+                    .OrderBy(b => b.Date).ToArray(), now)))
+            .Where(s => s != null).Cast<Signal>().ToArray();
+    }
 
     public static Evaluation Evaluate(PaperState state, int declaredCandidates, int minimumSessions = 120, int minimumTrades = 60)
         => EvaluateMetrics(state, declaredCandidates, minimumSessions, minimumTrades, committed: false);
