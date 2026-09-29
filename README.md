@@ -167,6 +167,8 @@ dotnet run --project src/Investment.Cli --no-restore -- krx-audit --plan config/
 dotnet run --project src/Investment.Cli --no-restore -- kind-delistings --start 2026-09-01 --end 2026-09-28 --max-requests 5 --interval-seconds 1
 ```
 
+분할·배당 공시 원문은 `kind-notice --source KIND공식외부공시주소`로 바이트와 관측시각을 보존합니다. `corporate-append`로 근거를 연결한 해석·정정·취소 기록을 추가하고 `corporate-at`으로 시장 기준시각과 기록부 기준시각을 지정해 조회합니다. 기본 방식은 실제 관측 이후만 허용합니다. 이 기록부는 아직 보유 수량·배당 현금이나 연구 인증을 변경하지 않습니다. [기업행위 근거와 시점별 조회](docs/corporate-actions.md)에 형식과 회계 적용 전제를 설명했습니다.
+
 ```powershell
 dotnet run --project src/Investment.Cli --no-restore -- krx-collect --plan config/my-collection.json --max-requests 5 --interval-seconds 1
 ```

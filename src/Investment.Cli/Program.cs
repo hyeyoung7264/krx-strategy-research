@@ -8,8 +8,17 @@ try
     string Option(string name, string fallback) { var i = Array.IndexOf(args, name); return i < 0 ? fallback : i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal) ? args[i + 1] : throw new ArgumentException($"Missing {name} value."); }
     T Load<T>(string path) => JsonSerializer.Deserialize<T>(File.ReadAllText(path)) ?? throw new ArgumentException("Empty JSON.");
     void Print(object value) => Console.WriteLine(JsonSerializer.Serialize(value, DataFiles.Json));
+    DateTimeOffset Timestamp(string name)
+    {
+        var value = Option(name, "");
+        if (!System.Text.RegularExpressions.Regex.IsMatch(value, @"\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,7})?(?:Z|[+-][0-9]{2}:[0-9]{2})\z") ||
+            !DateTimeOffset.TryParse(value, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var timestamp))
+            throw new ArgumentException($"{name} requires a full ISO date and time with UTC Z or a numeric offset.");
+        return timestamp;
+    }
     var command = args.FirstOrDefault() ?? "help";
-    var allowedOptions = new HashSet<string> { "--dataset", "--output", "--config", "--csv", "--source", "--start", "--end", "--corp-code", "--evidence", "--state", "--observation", "--persist", "--date", "--year", "--market", "--manifest", "--source-archive", "--archive", "--plan", "--max-requests", "--interval-seconds", "--ai-config" };
+    var allowedOptions = new HashSet<string> { "--dataset", "--output", "--config", "--csv", "--source", "--start", "--end", "--corp-code", "--evidence", "--state", "--observation", "--persist", "--date", "--year", "--market", "--manifest", "--source-archive", "--archive", "--plan", "--max-requests", "--interval-seconds", "--ai-config", "--cutoff", "--recorded-cutoff", "--timing" };
     for (var i = 1; i < args.Length; i++)
     {
         if (!allowedOptions.Contains(args[i])) throw new ArgumentException("Unknown or duplicated positional argument; no live-order options exist.");
@@ -106,6 +115,35 @@ try
             Print(new { Path = Path.GetFullPath(Path.Combine(output, "krx-collections", result.PlanHash, "collection-" + result.Id + ".json")),
                 Receipt = result, Note = "Unreviewed raw collection only. Empty responses require review; no automatic retry or calendar inference." });
             return result.Status is "REQUEST_FAILED" or "CANCELLED" or "EMPTY_RESPONSE_REQUIRES_REVIEW" ? 2 : 0;
+        }
+        case "corporate-append":
+        {
+            var manifest = Load<CorporateActionImport>(Option("--manifest", ""));
+            var prior = Option("--state", "");
+            var ledger = prior.Length == 0 ? new CorporateActionLedger([], []) : Load<CorporateActionLedger>(prior);
+            var next = ledger.Append(manifest.Revision, manifest.SnapshotFiles.Select(Load<KindNoticeSnapshot>).ToArray(), DateTimeOffset.UtcNow);
+            Print(new { path = store.Save("corporate-ledger", next.Hash, next), next.Hash,
+                Note = "Append-only interpretation evidence; no historical completeness, accounting application, point-in-time certification, or paper eligibility." });
+            break;
+        }
+        case "corporate-at":
+        {
+            var ledger = Load<CorporateActionLedger>(Option("--state", ""));
+            var result = ledger.At(Timestamp("--cutoff"), Timestamp("--recorded-cutoff"),
+                Option("--timing", "OBSERVED"), DateTimeOffset.UtcNow);
+            Print(new { path = store.Save("corporate-view", Guid.NewGuid().ToString("N"), result), result.Hash,
+                Count = result.Actions.Length, result.RetrospectiveTiming, result.Note });
+            break;
+        }
+        case "kind-notice":
+        {
+            using var client = new KindNoticeClient();
+            var snapshot = await client.Fetch(Option("--source", ""));
+            snapshot.Validate(DateTimeOffset.UtcNow);
+            Print(new { path = store.Save("kind-notice", Guid.NewGuid().ToString("N"), snapshot), snapshot.Source,
+                snapshot.ObservedAt, snapshot.RawHash,
+                Note = "Exact response bytes observed now; no original publication timestamp, interpreted terms, accounting application, or certification." });
+            break;
         }
         case "kind-delistings":
         {
@@ -336,6 +374,9 @@ try
                   krx-fetch --market KOSPI|KOSDAQ --date DATE | krx-build --manifest JSON
                   krx-calendar --year YEAR [--start DATE --end DATE] | krx-audit --plan JSON
                   kind-delistings --start DATE --end DATE [--market ALL|KOSPI|KOSDAQ|KONEX --max-requests 5 --interval-seconds 1]
+                  kind-notice --source KIND_EXTERNAL_HTML_URL
+                  corporate-append --manifest JSON [--state prior-corporate-ledger.json]
+                  corporate-at --state JSON --cutoff TIMESTAMP --recorded-cutoff TIMESTAMP [--timing OBSERVED|REVIEWED_PUBLICATION]
                   krx-basic-fetch --market KOSPI|KOSDAQ --date DATE
                   krx-index-fetch --market KOSPI|KOSDAQ --date DATE
                   krx-collect --plan JSON [--max-requests 5] [--interval-seconds 1]
@@ -358,3 +399,4 @@ catch (Exception ex)
 
 internal sealed record Settings(Costs Costs, Risk Risk, ResearchPlan Plan, StrategySpec[] Candidates);
 internal sealed record DartContextPlan(string[] SnapshotFiles, string[] DisclosureFiles, string CorpCode, DateTimeOffset Cutoff);
+internal sealed record CorporateActionImport(CorporateActionRevision Revision, string[] SnapshotFiles);
