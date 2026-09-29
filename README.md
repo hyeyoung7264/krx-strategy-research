@@ -132,6 +132,8 @@ dotnet run --project src/Investment.Cli --no-restore -- paper-evaluate --state p
 
 `Costs.TaxSchedule`로 거래일·결제일·총매도세·근거를 명시한 날짜별 표를 사용할 수 있습니다. 표가 있으면 누락 날짜에 고정 세율을 대신 쓰지 않고 중단하며 매도 체결과 추정 순청산가치에 같은 요율을 적용합니다. 기본 고정 비용은 진단용이고 승인 정책이 아닙니다. [공식 근거와 비용표 형식](docs/cost-policy.md)을 참고하세요.
 
+선택 사항인 `ResearchPlan.CostStress`는 미리 등록한 수수료·슬리피지 가산 시나리오로 선택 전략을 고정 재실행합니다. 진단에는 holdout 이전 자료만 사용하며 기존 합격 판정과 가설 수를 바꾸지 않습니다. `config/research-cost-stress.example.json`과 [비용 악화 진단](docs/cost-sensitivity.md)에 실행·재현 방법이 있습니다.
+
 Regime은 과거 20세션의 연속 구성종목 equal-weight 가격 변화 proxy(bull >3%, bear <-3%, 그 외 sideways)입니다. 기준이 바뀌면 새 진입을 중단하고 거래 가능 시 청산합니다. 산업별·변동성별 regime와 정교한 변화점 모델, 포트폴리오 상관/공통 위험 요인 분석은 후속 작업입니다.
 
 ## KRX 공식 일봉 연결
@@ -158,6 +160,12 @@ dotnet run --project src/Investment.Cli --no-restore -- krx-audit --plan config/
 ```
 
 감사 계획 형식은 `config/krx-audit.example.json`에 있습니다. 같은 날짜의 여러 원본 revision을 자동 선택하지 않으며, 누락/빈 날짜를 건너뛴 연속 비교도 하지 않습니다. 감사 결과는 연구 데이터 시점 인증이나 수익성 판정이 아닙니다.
+
+공개 KIND 상장폐지현황은 다음처럼 읽을 수 있습니다. 검증한 각 페이지를 즉시 보존하고 전체 페이지·건수·중복 검증이 끝난 뒤 전체 snapshot을 저장합니다. 로그인이나 인증키는 필요 없으며 공식 화면 변경·빈 결과 구조 미확인·예산 초과 시 중단합니다. 회사 링크 식별자를 종목코드·ISIN으로 변환하거나 현재 현황을 과거 매도 신호·폐지 정산가로 사용하지 않습니다.
+
+```powershell
+dotnet run --project src/Investment.Cli --no-restore -- kind-delistings --start 2026-09-01 --end 2026-09-28 --max-requests 5 --interval-seconds 1
+```
 
 ```powershell
 dotnet run --project src/Investment.Cli --no-restore -- krx-collect --plan config/my-collection.json --max-requests 5 --interval-seconds 1

@@ -26,6 +26,7 @@ public static class EvidenceReplay
         Compare("final-validation", expected.FinalValidation, actual.FinalValidation, differences);
         Compare("holdout", expected.Holdout, actual.Holdout, differences);
         Compare("evaluation", expected.Evaluation, actual.Evaluation, differences);
+        Compare("cost-diagnostics", expected.CostDiagnostics, actual.CostDiagnostics, differences);
         return new(differences.Count == 0, differences.ToArray(), expected.Id, data.Hash, current.Hash, current.Runtime);
     }
     public static ReplayCheck Backtest(Dataset data, RunResult expected, SourceSnapshot archived, SourceSnapshot current)

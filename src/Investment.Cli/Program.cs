@@ -107,6 +107,28 @@ try
                 Receipt = result, Note = "Unreviewed raw collection only. Empty responses require review; no automatic retry or calendar inference." });
             return result.Status is "REQUEST_FAILED" or "CANCELLED" or "EMPTY_RESPONSE_REQUIRES_REVIEW" ? 2 : 0;
         }
+        case "kind-delistings":
+        {
+            var query = new KindDelistingQuery(
+                DateOnly.Parse(Option("--start", ""), System.Globalization.CultureInfo.InvariantCulture),
+                DateOnly.Parse(Option("--end", ""), System.Globalization.CultureInfo.InvariantCulture),
+                Option("--market", "ALL"));
+            using var client = new KindDelistingClient();
+            var pages = new List<string>();
+            var snapshot = await client.Fetch(query,
+                maxPages: int.Parse(Option("--max-requests", "5"), System.Globalization.CultureInfo.InvariantCulture),
+                interval: TimeSpan.FromSeconds(double.Parse(Option("--interval-seconds", "1"), System.Globalization.CultureInfo.InvariantCulture)),
+                preservePage: page =>
+                {
+                    pages.Add(store.Save("kind-delisting-page", Guid.NewGuid().ToString("N"), page));
+                    return Task.CompletedTask;
+                });
+            snapshot.Validate(DateTimeOffset.UtcNow);
+            Print(new { path = store.Save("kind-delistings", snapshot.Id, new { CodeVersion = code, Snapshot = snapshot, PageFiles = pages }),
+                Pages = snapshot.Pages.Length, Rows = snapshot.Pages.Sum(page => page.Rows.Length),
+                Note = "Retrospective official listing screen only. Issuer IDs are not tickers/ISINs; no original disclosure time, execution eligibility, settlement proceeds, or promotion certification." });
+            break;
+        }
         case "krx-calendar":
         {
             var year = int.Parse(Option("--year", ""), System.Globalization.CultureInfo.InvariantCulture);
@@ -313,6 +335,7 @@ try
                   paper-evaluate --state JSON
                   krx-fetch --market KOSPI|KOSDAQ --date DATE | krx-build --manifest JSON
                   krx-calendar --year YEAR [--start DATE --end DATE] | krx-audit --plan JSON
+                  kind-delistings --start DATE --end DATE [--market ALL|KOSPI|KOSDAQ|KONEX --max-requests 5 --interval-seconds 1]
                   krx-basic-fetch --market KOSPI|KOSDAQ --date DATE
                   krx-index-fetch --market KOSPI|KOSDAQ --date DATE
                   krx-collect --plan JSON [--max-requests 5] [--interval-seconds 1]

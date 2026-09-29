@@ -1,12 +1,15 @@
 namespace Investment.Core;
 
 public sealed record ResearchPlan(int TrainSessions = 120, int ValidationSessions = 60, int TestSessions = 60,
-    int HoldoutSessions = 60, int MinimumTrades = 30, int MinimumEvaluationSessions = 60, bool PolicyReviewed = false)
+    int HoldoutSessions = 60, int MinimumTrades = 30, int MinimumEvaluationSessions = 60, bool PolicyReviewed = false,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    CostStressPlan? CostStress = null)
 {
     public void Validate()
     {
         if (TrainSessions < 30 || ValidationSessions < 30 || TestSessions < 30 || HoldoutSessions < 30 || MinimumTrades < 1 || MinimumEvaluationSessions < 30)
             throw new ArgumentException("Insufficient research windows.");
+        CostStress?.Validate();
     }
 }
 public sealed record Fold(int Index, DateOnly TrainStart, DateOnly TrainEnd, DateOnly ValidationStart,
@@ -15,7 +18,9 @@ public sealed record Fold(int Index, DateOnly TrainStart, DateOnly TrainEnd, Dat
 public sealed record Evaluation(string Decision, string[] Reasons, decimal LowerDailyMean, decimal TargetDailyMean = .01m);
 public sealed record ResearchResult(string Id, string DataHash, bool Synthetic, bool PointInTimeCertified,
     StrategySpec[] Candidates, ResearchPlan Plan, Fold[] Folds, RunResult[] FinalTraining, RunResult FinalValidation,
-    RunResult Holdout, Evaluation Evaluation, DateTimeOffset CreatedAt);
+    RunResult Holdout, Evaluation Evaluation, DateTimeOffset CreatedAt,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    CostSensitivityReport? CostDiagnostics = null);
 
 public interface IHypothesisGenerator { StrategySpec[] Generate(); }
 // A finite, registered search space. No unconstrained generated code execution.
@@ -29,7 +34,7 @@ public sealed class ResearchAgent
     public ResearchResult Run(Dataset data, StrategySpec[] candidates, ResearchPlan plan, Costs costs, Risk risk, string codeVersion)
     {
         data.Validate(); plan.Validate(); costs.Validate(); risk.Validate();
-        costs.RequireCoverage(data.Dates);
+        CostSensitivityRunner.Preflight(plan.CostStress, costs, data.Dates);
         if (candidates.Length < 2 || candidates.Length > 100 || candidates.Select(c => c.Id).Distinct().Count() != candidates.Length) throw new ArgumentException("Register 2..100 unique candidates before accessing holdout.");
         var dates = data.Dates; var researchEnd = dates.Length - plan.HoldoutSessions;
         var foldLength = plan.TrainSessions + plan.ValidationSessions + plan.TestSessions;
@@ -52,6 +57,14 @@ public sealed class ResearchAgent
         var finalTrain = candidates.Select(c => Test(c, finalTrainFirst, plan.TrainSessions)).ToArray();
         var finalSelected = Select(finalTrain, risk).Strategies[0];
         var finalValidation = Test(finalSelected, researchEnd - plan.ValidationSessions, plan.ValidationSessions);
+        CostSensitivityReport? diagnostics = null;
+        if (plan.CostStress is { } stress)
+        {
+            var input = CostSensitivityData.BeforeHoldout(data, dates[researchEnd]);
+            var windows = folds.Select(f => CostSensitivityWindowInput.FromRun($"fold-{f.Index}", "walk-forward-test", f.Test))
+                .Append(CostSensitivityWindowInput.FromRun("final-validation", "final-validation", finalValidation)).ToArray();
+            diagnostics = CostSensitivityRunner.Run(input, dates[researchEnd], stress, costs, risk, windows, codeVersion);
+        }
         var holdout = Test(finalSelected, researchEnd, plan.HoldoutSessions);
         var reasons = new List<string>();
         if (!plan.PolicyReviewed) reasons.Add("RESEARCH_POLICY_NOT_REVIEWED: cost/risk/statistical settings are illustrative defaults");
@@ -67,7 +80,7 @@ public sealed class ResearchAgent
         // PAPER_ELIGIBLE is evidence eligibility, never authorization to place live orders.
         return new(Guid.NewGuid().ToString("N"), data.Hash, data.Synthetic, data.PointInTimeCertified, candidates, plan,
             folds.ToArray(), finalTrain, finalValidation, holdout,
-            new(reasons.Count == 0 ? "PAPER_ELIGIBLE" : "HOLD_OR_REJECT", reasons.ToArray(), bound), DateTimeOffset.UtcNow);
+            new(reasons.Count == 0 ? "PAPER_ELIGIBLE" : "HOLD_OR_REJECT", reasons.ToArray(), bound), DateTimeOffset.UtcNow, diagnostics);
     }
     private static RunResult Select(RunResult[] training, Risk risk) => training
         .OrderByDescending(r => r.Metrics.MaximumDrawdown <= risk.Drawdown && r.Metrics.ExpectedValuePerTrade > 0)

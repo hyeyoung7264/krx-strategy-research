@@ -5,7 +5,9 @@ public sealed record FamilyCorrelation(string FirstFamily, string SecondFamily, 
 public sealed record CohortResult(string Id, string DataHash, bool Synthetic, bool PointInTimeCertified,
     StrategySpec[] Candidates, ResearchPlan Plan, int DeclaredHypotheses, ResearchResult[] Families,
     PortfolioFold[] Folds, RunResult FinalValidation, RunResult Holdout, FamilyCorrelation[] Correlations,
-    Evaluation Evaluation, DateTimeOffset CreatedAt, DateTimeOffset? HypothesesCreatedAt = null);
+    Evaluation Evaluation, DateTimeOffset CreatedAt, DateTimeOffset? HypothesesCreatedAt = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    CostSensitivityReport? CostDiagnostics = null);
 
 /// <summary>One preregistered cohort evaluates each family and its selected joint portfolio on the same sealed holdout.</summary>
 public sealed class CohortAgent
@@ -14,7 +16,7 @@ public sealed class CohortAgent
         DateTimeOffset? hypothesesCreatedAt = null)
     {
         data.Validate(); plan.Validate(); costs.Validate(); risk.Validate();
-        costs.RequireCoverage(data.Dates);
+        CostSensitivityRunner.Preflight(plan.CostStress, costs, data.Dates);
         if (candidates.Length > 100 || candidates.Select(c => c.Id).Distinct().Count() != candidates.Length)
             throw new ArgumentException("Register at most 100 unique candidates before cohort evaluation.");
         foreach (var spec in candidates) spec.Validate();
@@ -44,8 +46,17 @@ public sealed class CohortAgent
             folds.Add(new(index, selected.Select(s => s.Id).ToArray(), validation, test,
                 components.All(f => f.ValidationPassed) && ResearchAgent.Basic(validation, plan, risk)));
         }
-        var finalSpecs = families.Select(f => f.Holdout.Strategies.Single()).ToArray();
+        var finalSpecs = families.Select(f => f.FinalValidation.Strategies.Single()).ToArray();
         var finalValidation = engine.Run(data, finalSpecs, families[0].FinalValidation.Start, families[0].FinalValidation.End, costs, risk, codeVersion: codeVersion);
+        CostSensitivityReport? diagnostics = null;
+        if (plan.CostStress is { } stress)
+        {
+            var holdoutStart = data.Dates[^plan.HoldoutSessions];
+            var input = CostSensitivityData.BeforeHoldout(data, holdoutStart);
+            var windows = folds.Select(f => CostSensitivityWindowInput.FromRun($"fold-{f.Index}", "walk-forward-test", f.Test))
+                .Append(CostSensitivityWindowInput.FromRun("final-validation", "final-validation", finalValidation)).ToArray();
+            diagnostics = CostSensitivityRunner.Run(input, holdoutStart, stress, costs, risk, windows, codeVersion);
+        }
         var holdout = engine.Run(data, finalSpecs, families[0].Holdout.Start, families[0].Holdout.End, costs, risk, codeVersion: codeVersion);
         var lower = Statistics.LowerMeanBound(holdout.Equity.Select(p => p.DailyReturn).ToArray(), hypotheses, block: block);
         var failures = new List<string>();
@@ -75,6 +86,6 @@ public sealed class CohortAgent
             }
         return new(Guid.NewGuid().ToString("N"), data.Hash, data.Synthetic, data.PointInTimeCertified, candidates, plan,
             hypotheses, families, folds.ToArray(), finalValidation, holdout, correlations.ToArray(),
-            new(failures.Count == 0 ? "PAPER_ELIGIBLE" : "HOLD_OR_REJECT", failures.ToArray(), lower), DateTimeOffset.UtcNow, hypothesesCreatedAt);
+            new(failures.Count == 0 ? "PAPER_ELIGIBLE" : "HOLD_OR_REJECT", failures.ToArray(), lower), DateTimeOffset.UtcNow, hypothesesCreatedAt, diagnostics);
     }
 }

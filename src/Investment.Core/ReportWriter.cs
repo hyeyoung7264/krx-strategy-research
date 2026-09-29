@@ -34,6 +34,7 @@ public static class ReportWriter
         foreach (var pair in result.Correlations)
             text.AppendLine($"- {pair.FirstFamily}/{pair.SecondFamily}, {pair.Sessions} aligned daily sessions: {pair.Correlation?.ToString("F4", CultureInfo.InvariantCulture) ?? "undefined (flat returns)"}.");
         text.AppendLine("Correlation is a historical diagnostic, not proof of independence or a new selection rule. The portfolio simulation shares cash, security/sector/strategy caps and liquidity between families.");
+        AppendCostDiagnostics(text, result.CostDiagnostics);
         text.AppendLine("Small samples, bootstrap assumptions, gaps, suspensions and daily-bar fill approximations limit inference. Insufficient tail resolution fails the statistical gate. Real forward paper evidence remains required.");
         return text.ToString();
     }
@@ -67,9 +68,29 @@ public static class ReportWriter
         text.AppendLine($"| Expected value per closed trade, currency units | {N(m.ExpectedValuePerTrade)} |");
         text.AppendLine($"| Closed trades | {m.NumberOfTrades} |"); text.AppendLine($"| Open positions | {m.OpenPositions} |");
         text.AppendLine($"| Sharpe (zero risk-free rate assumption) | {m.Sharpe?.ToString("F4", CultureInfo.InvariantCulture) ?? "undefined"} |");
+        AppendCostDiagnostics(text, result.CostDiagnostics);
         text.AppendLine(); text.AppendLine("## Limitations"); text.AppendLine();
         text.AppendLine("Daily bars do not prove fillability or enforce an exact intraday daily-loss ceiling. Gaps, price limits, suspensions and quote gaps can exceed risk triggers. Corporate actions are rejected pending an explicit point-in-time adjustment model.");
         text.AppendLine("Bootstrap bounds are conditional on the preregistered candidate set, block-length assumptions and available sample. Repeatedly inspecting/reusing holdout invalidates the inference. Independent forward paper evidence is required.");
         return text.ToString();
+    }
+
+    private static void AppendCostDiagnostics(StringBuilder text, CostSensitivityReport? report)
+    {
+        if (report == null) return;
+        string P(decimal value) => value.ToString("P4", CultureInfo.InvariantCulture);
+        text.AppendLine(); text.AppendLine("## Preregistered cost sensitivity before holdout"); text.AppendLine();
+        text.AppendLine(report.Note);
+        text.AppendLine("Each window keeps its selected strategies. Return changes are percentage-point differences from the original cost assumptions; overlapping windows are not pooled. Holdout is excluded.");
+        text.AppendLine();
+        text.AppendLine("| Window | Period | Scenario | Net return | Return change | MDD | Closed trades | Events |");
+        text.AppendLine("|---|---|---|---:|---:|---:|---:|---:|");
+        foreach (var window in report.Windows)
+        {
+            text.AppendLine($"| {window.WindowKey} | {window.Start:yyyy-MM-dd} to {window.End:yyyy-MM-dd} | baseline | {P(window.BaselineMetrics.TotalReturn)} | {P(0)} | {P(window.BaselineMetrics.MaximumDrawdown)} | {window.BaselineMetrics.NumberOfTrades} | {window.BaselineEvents.Length} |");
+            foreach (var scenario in window.Scenarios)
+                text.AppendLine($"| {window.WindowKey} | {window.Start:yyyy-MM-dd} to {window.End:yyyy-MM-dd} | {scenario.ScenarioKey} | {P(scenario.Metrics.TotalReturn)} | {P(scenario.Delta.TotalReturn)} | {P(scenario.Metrics.MaximumDrawdown)} | {scenario.Metrics.NumberOfTrades} | {scenario.Events.Length} |");
+        }
+        text.AppendLine();
     }
 }

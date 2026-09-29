@@ -283,6 +283,16 @@ public sealed class AiResearchTests
         await Assert.ThrowsAsync<ArgumentException>(() => new AiResearchWorker(root).Run(data, Plan, costs, new(), Settings, "fixture", Unexpected));
         Assert.Equal(0, calls); Assert.False(Directory.Exists(root));
     }
+    [Fact] public async Task ImpossibleStressCostsFailBeforeProviderOrAttempt()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "ai-research-" + Guid.NewGuid().ToString("N")); var calls = 0;
+        Task<HypothesisProposal> Unexpected(string input, CancellationToken ct)
+        { calls++; throw new InvalidOperationException("Provider must not be called for invalid stress costs."); }
+        var plan = Plan with { CostStress = new([new("invalid-total", .6m, 0)]) };
+        await Assert.ThrowsAsync<ArgumentException>(() => new AiResearchWorker(root).Run(DataFiles.Demo(180), plan,
+            new Costs(.5m, 0, 0), new(), Settings, "fixture", Unexpected));
+        Assert.Equal(0, calls); Assert.False(Directory.Exists(root));
+    }
     [Fact] public async Task WorkerRejectsNormalizedCandidatesThatDifferFromRawProviderEvidence()
     {
         var root = Path.Combine(Path.GetTempPath(), "ai-research-" + Guid.NewGuid().ToString("N"));

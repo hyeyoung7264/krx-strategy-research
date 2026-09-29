@@ -132,7 +132,7 @@ public sealed class AiResearchWorker(string directory)
     {
         settings.Validate(); costs.Validate(); risk.Validate(); var training = TrainingData(data, plan);
         if (training.Bars.Any(b => b.AvailableAt > DateTimeOffset.UtcNow)) throw new ArgumentException("AI training contains observations not yet available.");
-        costs.RequireCoverage(training.Dates);
+        CostSensitivityRunner.Preflight(plan.CostStress, costs, training.Dates);
         var store = new EvidenceStore(directory); var id = Guid.NewGuid().ToString("N"); var rounds = new List<AiRound>();
         var status = "REQUEST_BUDGET_EXHAUSTED"; string? error = null; var seen = new HashSet<string>();
         var sessionOffsets = training.Dates.Select((date, offset) => (date, offset)).ToDictionary(x => x.date, x => x.offset);

@@ -1,0 +1,70 @@
+{
+  "Costs": {
+    "Commission": 0.00015,
+    "SellTax": 0.002,
+    "Slippage": 0.001
+  },
+  "Risk": {
+    "PositionCap": 0.1,
+    "StrategyCap": 0.4,
+    "ExposureCap": 0.8,
+    "SectorCap": 0.3,
+    "DailyLoss": 0.02,
+    "Drawdown": 0.1,
+    "StopLoss": 0.05,
+    "Participation": 0.01
+  },
+  "Plan": {
+    "TrainSessions": 120,
+    "ValidationSessions": 60,
+    "TestSessions": 60,
+    "HoldoutSessions": 60,
+    "MinimumTrades": 30,
+    "MinimumEvaluationSessions": 60,
+    "PolicyReviewed": false,
+    "CostStress": {
+      "Scenarios": [
+        {
+          "SlippageAdd": 0.001,
+          "CommissionAdd": 0,
+          "ScenarioKey": "wider-spread"
+        },
+        {
+          "SlippageAdd": 0.0025,
+          "CommissionAdd": 0.00015,
+          "ScenarioKey": "higher-friction"
+        }
+      ]
+    }
+  },
+  "Candidates": [
+    {
+      "Family": "momentum",
+      "Lookback": 10,
+      "Threshold": 0.02,
+      "HoldDays": 5,
+      "Version": 1
+    },
+    {
+      "Family": "momentum",
+      "Lookback": 20,
+      "Threshold": 0.03,
+      "HoldDays": 10,
+      "Version": 1
+    },
+    {
+      "Family": "reversion",
+      "Lookback": 5,
+      "Threshold": 0.03,
+      "HoldDays": 3,
+      "Version": 1
+    },
+    {
+      "Family": "reversion",
+      "Lookback": 10,
+      "Threshold": 0.05,
+      "HoldDays": 5,
+      "Version": 1
+    }
+  ]
+}
