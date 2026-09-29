@@ -108,12 +108,23 @@ try
             var plan = Load<KrxCollectionPlan>(Option("--plan", ""));
             using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
             var client = new KrxClient(http);
-            var result = await new KrxCollector(Path.Combine(output, "krx-collections")).Run(plan,
-                int.Parse(Option("--max-requests", "5"), System.Globalization.CultureInfo.InvariantCulture),
-                TimeSpan.FromSeconds(double.Parse(Option("--interval-seconds", "1"), System.Globalization.CultureInfo.InvariantCulture)),
-                (market, date, ct) => client.Daily(ApiKey("KRX_API_KEY"), market, date, ct));
+            var reference = new KrxReferenceClient(http);
+            var collector = new KrxCollector(Path.Combine(output, "krx-collections"));
+            var budget = int.Parse(Option("--max-requests", "5"), System.Globalization.CultureInfo.InvariantCulture);
+            var interval = TimeSpan.FromSeconds(double.Parse(Option("--interval-seconds", "1"), System.Globalization.CultureInfo.InvariantCulture));
+            var result = plan.Service switch
+            {
+                null or "DAILY" => await collector.Run(plan, budget, interval,
+                    (market, date, ct) => client.Daily(ApiKey("KRX_API_KEY"), market, date, ct)),
+                "BASIC" => await collector.RunBasic(plan, budget, interval,
+                    (market, date, ct) => reference.BasicInfo(ApiKey("KRX_API_KEY"), market, date, ct)),
+                "INDEX" => await collector.RunIndex(plan, budget, interval,
+                    (market, date, ct) => reference.IndexDaily(ApiKey("KRX_API_KEY"), market, date, ct)),
+                _ => throw new ArgumentException("Collection service must be DAILY, BASIC or INDEX.")
+            };
             Print(new { Path = Path.GetFullPath(Path.Combine(output, "krx-collections", result.PlanHash, "collection-" + result.Id + ".json")),
-                Receipt = result, Note = "Unreviewed raw collection only. Empty responses require review; no automatic retry or calendar inference." });
+                Service = plan.Service ?? "DAILY", Receipt = result,
+                Note = "Unreviewed raw collection only. Empty responses require review; no automatic retry, calendar inference, historical publication certification, or cross-service dataset merge." });
             return result.Status is "REQUEST_FAILED" or "CANCELLED" or "EMPTY_RESPONSE_REQUIRES_REVIEW" ? 2 : 0;
         }
         case "corporate-append":
