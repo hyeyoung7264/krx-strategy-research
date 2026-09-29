@@ -74,10 +74,29 @@ internal static class CostSensitivityData
         var bars = data.Bars.Where(b => b.Date < holdoutStart).ToArray();
         var tickers = bars.Select(b => b.Ticker).ToHashSet(StringComparer.Ordinal);
         var events = data.LifecycleEvents?.Where(e => e.Date < holdoutStart && tickers.Contains(e.Ticker)).ToArray();
+        if (bars.Length == 0) throw new ArgumentException("Cost diagnostics require observations before holdout.");
+        var units = ShareUnitPrefix.Select(data, tickers, bars.Max(b => b.Date), Clock.Open(holdoutStart).AddTicks(-1));
         var trimmed = data with { Bars = bars, Sessions = data.Sessions?.Where(d => d < holdoutStart).ToArray(),
-            LifecycleEvents = events is { Length: > 0 } ? events : null };
+            LifecycleEvents = events is { Length: > 0 } ? events : null,
+            ShareUnitChanges = units.Changes, ShareInventoryCredits = units.Credits };
         trimmed.Validate();
         return trimmed;
+    }
+}
+
+internal static class ShareUnitPrefix
+{
+    internal static (ShareUnitChange[]? Changes, ShareInventoryCredit[]? Credits) Select(Dataset data,
+        HashSet<string> tickers, DateOnly economicDate, DateTimeOffset knownAt)
+    {
+        // An earlier effective event can still explain old quote units or pending inventory.
+        // Keep its known future schedule, but never import a later observed credit or event.
+        var changes = data.ShareUnitChanges?.Where(c => tickers.Contains(c.Ticker) &&
+            c.EffectiveDate <= economicDate && c.AvailableAt <= knownAt).ToArray();
+        var keys = (changes ?? []).Select(c => c.ActionKey).ToHashSet(StringComparer.Ordinal);
+        var credits = data.ShareInventoryCredits?.Where(c => keys.Contains(c.ActionKey) &&
+            c.CreditedAt <= knownAt && c.AvailableAt <= knownAt).ToArray();
+        return (changes is { Length: > 0 } ? changes : null, credits is { Length: > 0 } ? credits : null);
     }
 }
 

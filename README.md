@@ -56,7 +56,7 @@ dotnet run --project src/Investment.Cli --no-restore -- cohort-research --datase
 
 날짜 형식은 `yyyy-MM-dd`, AvailableAt에는 명시적 timezone이 필요합니다. Member/섹터/거래 가능 상태는 해당 거래일 당시 자료여야 합니다. 상장된 기간에는 거래정지·무거래 행까지 매 세션 보존합니다. 상장 전과 폐지 후의 행은 만들지 않고, 종목이 나타나거나 사라지는 경계에는 출처와 공개시각을 가진 `LifecycleEvents`를 요구합니다. 보유 종목이 폐지 등으로 가격 없이 사라지면 회수·권리 처리 증거가 없는 백테스트를 중단합니다. 날짜를 임의로 채워 만든 종목이나 잔여 가치를 실제 데이터로 인증하면 안 됩니다.
 
-CSV 수입은 `PointInTimeCertified=false`로 생성됩니다. 인증은 데이터 품질·역사적 universe·수정주가·시점·공식 거래일 캘린더의 별도 검토가 필요합니다. 인증된 JSON에는 `Sessions`에 실제 거래일을 순서대로 명시해야 합니다. 단순히 flag를 바꾸면 품질이 검증되는 것은 아닙니다. `CorporateAction=true`인 자료는 명시적인 주식수/가격 조정 구현 전까지 거부합니다.
+CSV 수입은 `PointInTimeCertified=false`로 생성됩니다. 인증은 데이터 품질·역사적 universe·수정주가·시점·공식 거래일 캘린더의 별도 검토가 필요합니다. 인증된 JSON에는 `Sessions`에 실제 거래일을 순서대로 명시해야 합니다. 단순히 flag를 바꾸면 품질이 검증되는 것은 아닙니다. `CorporateAction=true`인 자료는 대응하는 명시적 주식 단위 변경이 필요합니다. 분할·병합의 효력일·원시 가격 전환일·입고 가용성을 구분하며, 미지원 단주나 다른 권리의 정산을 추정하지 않습니다. [분할·병합 회계](docs/share-unit-accounting.md)를 참고하세요.
 
 ## OpenDART
 
@@ -167,7 +167,7 @@ dotnet run --project src/Investment.Cli --no-restore -- krx-audit --plan config/
 dotnet run --project src/Investment.Cli --no-restore -- kind-delistings --start 2026-09-01 --end 2026-09-28 --max-requests 5 --interval-seconds 1
 ```
 
-분할·배당 공시 원문은 `kind-notice --source KIND공식외부공시주소`로 바이트와 관측시각을 보존합니다. `corporate-append`로 근거를 연결한 해석·정정·취소 기록을 추가하고 `corporate-at`으로 시장 기준시각과 기록부 기준시각을 지정해 조회합니다. 기본 방식은 실제 관측 이후만 허용합니다. 이 기록부는 아직 보유 수량·배당 현금이나 연구 인증을 변경하지 않습니다. [기업행위 근거와 시점별 조회](docs/corporate-actions.md)에 형식과 회계 적용 전제를 설명했습니다.
+분할·배당 공시 원문은 `kind-notice --source KIND공식외부공시주소`로 바이트와 관측시각을 보존합니다. `corporate-append`로 근거를 연결한 해석·정정·취소 기록을 추가하고 `corporate-at`으로 시장 기준시각과 기록부 기준시각을 지정해 조회합니다. 기본 방식은 실제 관측 이후만 허용합니다. 이 기록부 자체는 보유 수량·배당 현금이나 연구 인증을 변경하지 않습니다. [기업행위 근거와 시점별 조회](docs/corporate-actions.md)에 형식과 회계 적용 전제를 설명했습니다. 백테스트·paper의 분할·병합 회계에는 별도의 검토된 실행 입력이 필요합니다.
 
 ```powershell
 dotnet run --project src/Investment.Cli --no-restore -- krx-collect --plan config/my-collection.json --max-requests 5 --interval-seconds 1

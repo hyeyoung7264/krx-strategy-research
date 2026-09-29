@@ -7,10 +7,20 @@ namespace Investment.Core;
 public sealed record Quote(string Ticker, string Sector, DateTimeOffset Time, decimal Bid, decimal Ask, bool Tradable);
 public sealed record Observation(string Source, string Kind, DateTimeOffset ObservedAt, Quote[] Quotes, Bar[] ClosedBars, bool VerifiedFeed = false,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    SecurityLifecycleEvent[]? LifecycleEvents = null);
+    SecurityLifecycleEvent[]? LifecycleEvents = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareUnitChange[]? ShareUnitChanges = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareInventoryCredit[]? ShareInventoryCredits = null);
 public interface IObservationFeed { Task<Observation> Observe(CancellationToken cancellationToken); }
 public sealed record PaperPosition(StrategySpec Strategy, Signal Signal, DateTimeOffset EntryTime, decimal EntryPrice,
-    int Quantity, decimal Paid, decimal StopLoss, string Sector);
+    int Quantity, decimal Paid, decimal StopLoss, string Sector,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string[]? ShareUnitActionKeys = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    int? OriginalEntryQuantity = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    decimal? OriginalStopLoss = null);
 public sealed record PaperFill(Trade Trade, decimal StopLoss, decimal? TakeProfit, decimal? ExpectedReturn, string MarketCondition, string Source);
 public sealed record PaperAudit(int Sequence, string PreviousHash, string Hash, Observation Observation, string[] Actions);
 public sealed record PaperState(string SessionId, string[] ResearchEvidenceIds, StrategySpec[] Strategies, Costs Costs, Risk Risk,
@@ -20,7 +30,13 @@ public sealed record PaperState(string SessionId, string[] ResearchEvidenceIds, 
     EquityPoint[] Equity, PaperAudit[] Audit, decimal Turnover, Dictionary<string, int>? LiquidityUsed = null, string CodeVersion = "",
     int ResearchCandidateCount = 0, string CohortEvidenceId = "",
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    SecurityLifecycleEvent[]? LifecycleEvents = null);
+    SecurityLifecycleEvent[]? LifecycleEvents = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareUnitChange[]? ShareUnitChanges = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareInventoryCredit[]? ShareInventoryCredits = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareUnitAdjustment[]? ShareUnitAdjustments = null);
 
 public static class PaperEngine
 {
@@ -66,15 +82,19 @@ public static class PaperEngine
         if (specs.Select(s => s.Id).Distinct().Count() != specs.Length || specs.Select(s => s.Family).Distinct().Count() < 2)
             throw new ArgumentException("Diversify distinct versions and strategy families; correlation still requires review.");
         if (history.Bars.Any(b => b.AvailableAt >= now || Clock.Close(b.Date) >= now)) throw new ArgumentException("Future paper seed.");
+        if ((history.ShareUnitChanges ?? []).Any(c => c.AvailableAt >= now) ||
+            (history.ShareInventoryCredits ?? []).Any(c => c.AvailableAt >= now))
+            throw new ArgumentException("Future paper share-unit evidence.");
         if (cohort == null) throw new ArgumentException("Independent winning results require joint portfolio validation; use a complete cohort archive.");
         if (cohort.Holdout.Costs != costs || cohort.Holdout.Risk != risk || cohort.Holdout.CodeVersion != codeVersion ||
             !cohort.Holdout.Strategies.SequenceEqual(specs)) throw new ArgumentException("Cohort portfolio settings/version mismatch.");
-        var signals = Signals(history.Bars, specs, now, history.LifecycleEvents);
+        var signals = Signals(history.Bars, specs, now, history.LifecycleEvents, history.ShareUnitChanges);
         return new(Guid.NewGuid().ToString("N"), new[] { cohort.Id }.Concat(evidence.Select(e => e.Id)).ToArray(), specs, costs, risk, initial, initial,
             initial, initial, null, now, BacktestEngine.Regime(history, history.Dates.Length - 1, now), false, false,
             history.Bars, signals, [], [], [], [], 0, CodeVersion: codeVersion,
             ResearchCandidateCount: cohort.DeclaredHypotheses, CohortEvidenceId: cohort.Id,
-            LifecycleEvents: history.LifecycleEvents);
+            LifecycleEvents: history.LifecycleEvents, ShareUnitChanges: history.ShareUnitChanges,
+            ShareInventoryCredits: history.ShareInventoryCredits);
     }
 
     public static PaperState Step(PaperState state, Observation observation, DateTimeOffset now)
@@ -94,15 +114,52 @@ public static class PaperEngine
             if (q.Time > observation.ObservedAt || observation.ObservedAt - q.Time > TimeSpan.FromSeconds(10) || q.Bid <= 0 || q.Ask < q.Bid || string.IsNullOrWhiteSpace(q.Sector)) throw new ArgumentException("Invalid or stale quote.");
         var map = observation.Quotes.ToDictionary(q => q.Ticker); var positions = state.Positions.ToList(); var fills = state.Fills.ToList();
         if (positions.Any(p => !map.ContainsKey(p.Signal.Ticker))) throw new ArgumentException("Missing held-security quote; cannot hide losses.");
+        if (positions.Any(p => p.ShareUnitActionKeys is { Length: > 0 } && p.OriginalStopLoss is not > 0))
+            throw new InvalidOperationException("Converted paper position lacks its original stop; cannot reconstruct a rounded risk boundary.");
         var actions = new List<string>(); var cash = state.Cash; var turnover = state.Turnover; var halted = state.Halted;
         var costs = state.Costs; var risk = state.Risk;
+        // New evidence is retained verbatim in the observation and replayed from the journal.
+        // A later observation cannot rewrite an already effective conversion or an earlier credit.
+        var newChanges = observation.ShareUnitChanges ?? [];
+        var newCredits = observation.ShareInventoryCredits ?? [];
+        if (newChanges.Any(c => c is null || c.AvailableAt > observation.ObservedAt || Clock.Open(c.EffectiveDate) <= state.LastObservation) ||
+            newCredits.Any(c => c is null || c.AvailableAt > observation.ObservedAt))
+            throw new ArgumentException("Future or late paper share-unit evidence; cannot repair past accounting in place.");
+        var changes = (state.ShareUnitChanges ?? []).Concat(newChanges).ToArray();
+        var credits = (state.ShareInventoryCredits ?? []).Concat(newCredits).ToArray();
+        ShareUnits.Validate(changes, credits);
+        var unitAdjustments = (state.ShareUnitAdjustments ?? []).ToList();
+        foreach (var change in changes.Where(c => c.EffectiveDate <= date && c.AvailableAt <= observation.ObservedAt)
+                     .OrderBy(c => c.EffectiveDate).ThenBy(c => c.ActionKey, StringComparer.Ordinal))
+        {
+            foreach (var p in positions.Where(p => p.Signal.Ticker == change.Ticker && p.EntryTime < Clock.Open(change.EffectiveDate)).ToArray())
+            {
+                var appliedKeys = p.ShareUnitActionKeys ?? [];
+                if (appliedKeys.Contains(change.ActionKey, StringComparer.Ordinal)) continue;
+                var originalStop = p.OriginalStopLoss ?? (appliedKeys.Length == 0 ? p.StopLoss :
+                    throw new InvalidOperationException("Converted paper position lacks its original stop; cannot reconstruct a rounded risk boundary."));
+                var quantity = ShareUnits.AdjustQuantity(p.Quantity, change);
+                var updatedKeys = appliedKeys.Append(change.ActionKey).ToArray();
+                var stop = ShareUnits.StopLoss(originalStop, updatedKeys.Select(key => changes.Single(c => c.ActionKey == key)));
+                positions[positions.IndexOf(p)] = p with { Quantity = quantity, StopLoss = stop,
+                    ShareUnitActionKeys = updatedKeys, OriginalStopLoss = originalStop };
+                unitAdjustments.Add(new(change.ActionKey, change.Ticker, observation.ObservedAt, p.Strategy.Id,
+                    p.EntryTime, p.Quantity, quantity, p.StopLoss, stop, p.Paid, ShareUnits.Hash(change)));
+                actions.Add($"SHARE_UNIT:{change.ActionKey}:{p.Strategy.Id}:{p.Quantity}->{quantity}");
+            }
+        }
+        // Compare/mark current economic holdings using the units actually supplied by each quote.
+        decimal EconomicQuote(string ticker, decimal raw) => ShareUnits.EconomicPrice(raw, ticker, date, date, observation.ObservedAt, changes);
         var liquidityUsed = observation.Kind == "open" ? new Dictionary<string, int>() : new Dictionary<string, int>(state.LiquidityUsed ?? []);
         int RemainingLiquidity(string ticker)
         {
             var published = state.History.Where(b => b.Ticker == ticker && b.Date < date && date.DayNumber - b.Date.DayNumber <= 30 && b.AvailableAt < Clock.Open(date) && b.Tradable && b.Volume > 0).OrderBy(b => b.Date).LastOrDefault();
-            return published == null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, decimal.Floor(published.Volume * risk.Participation) - liquidityUsed.GetValueOrDefault(ticker)));
+            return published == null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0,
+                decimal.Floor(ShareUnits.CapacityVolume(ticker, published.Date, date, published.Volume,
+                    Clock.Open(date), changes) * risk.Participation) - liquidityUsed.GetValueOrDefault(ticker)));
         }
-        decimal Mark() => cash + positions.Sum(p => p.Quantity * map[p.Signal.Ticker].Bid * (1 - costs.Slippage) * (1 - costs.Commission - sellTax));
+        decimal Mark() => cash + positions.Sum(p => p.Quantity * EconomicQuote(p.Signal.Ticker, map[p.Signal.Ticker].Bid) *
+            (1 - costs.Slippage) * (1 - costs.Commission - sellTax));
         var equity = Mark(); var dayStart = observation.Kind == "open" ? state.Equity.LastOrDefault()?.Equity ?? state.InitialCapital : state.DayStartEquity;
         var peak = Math.Max(state.Peak, equity);
         if (equity / dayStart - 1 <= -risk.DailyLoss || 1 - equity / peak >= risk.Drawdown)
@@ -117,8 +174,8 @@ public static class PaperEngine
             if (history.Length == 0) throw new ArgumentException("Missing paper seed history.");
             var previousDate = history.Max(b => b.Date);
             var expected = history.Where(b => b.Date == previousDate).Select(b => b.Ticker).ToHashSet(StringComparer.Ordinal);
-            var changes = observation.LifecycleEvents ?? [];
-            foreach (var change in changes)
+            var lifecycleChanges = observation.LifecycleEvents ?? [];
+            foreach (var change in lifecycleChanges)
             {
                 if (change.Date != date || change.AvailableAt > observation.ObservedAt || string.IsNullOrWhiteSpace(change.Evidence))
                     throw new ArgumentException("Invalid or unobserved paper lifecycle event.");
@@ -136,21 +193,26 @@ public static class PaperEngine
             if (!bars.Select(b => b.Ticker).ToHashSet(StringComparer.Ordinal).SetEquals(expected))
                 throw new ArgumentException("Incomplete close universe or missing lifecycle event.");
             history = history.Concat(bars).ToArray();
-            if (changes.Length != 0) lifecycle = (lifecycle ?? []).Concat(changes).ToArray();
-            var data = new Dataset(observation.Source, false, false, history, LifecycleEvents: lifecycle); data.Validate();
-            var regime = BacktestEngine.Regime(data, data.Dates.Length - 1);
+            if (lifecycleChanges.Length != 0) lifecycle = (lifecycle ?? []).Concat(lifecycleChanges).ToArray();
+            var data = new Dataset(observation.Source, false, false, history, LifecycleEvents: lifecycle,
+                ShareUnitChanges: changes.Length == 0 ? null : changes, ShareInventoryCredits: credits.Length == 0 ? null : credits); data.Validate();
+            var regime = BacktestEngine.Regime(data, data.Dates.Length - 1, observation.ObservedAt);
             if (baseline == "unknown" || baseline == null) baseline = regime;
             else if (regime != baseline) { halted = true; actions.Add($"REGIME_CHANGE:{baseline}->{regime}"); }
-            pending = halted ? [] : Signals(history, state.Strategies, observation.ObservedAt, lifecycle);
+            pending = halted ? [] : Signals(history, state.Strategies, observation.ObservedAt, lifecycle, changes);
         }
         else if (observation.ClosedBars.Length != 0 || observation.LifecycleEvents is { Length: > 0 })
             throw new ArgumentException("Close bars and lifecycle events may only arrive with close event.");
         foreach (var p in positions.ToArray())
         {
             var q = map[p.Signal.Ticker]; if (!q.Tradable) { actions.Add($"UNFILLABLE:{q.Ticker}"); continue; }
+            if (!ShareUnits.CanTrade(q.Ticker, date, observation.ObservedAt, changes))
+            { actions.Add($"UNFILLABLE:{q.Ticker}:share-unit-transition"); continue; }
             var holdingSessions = history.Select(b => b.Date).Distinct().Count(d => d >= DateOnly.FromDateTime(p.EntryTime.ToOffset(TimeSpan.FromHours(9)).DateTime) && d < date);
             var due = observation.Kind == "open" && holdingSessions >= p.Strategy.HoldDays;
             if (!halted && !due && q.Bid > p.StopLoss) continue;
+            if (!ShareUnits.CanSell(p.ShareUnitActionKeys ?? [], credits, observation.ObservedAt))
+            { actions.Add($"UNFILLED_EXIT:{q.Ticker}:share-inventory-unavailable"); continue; }
             var quantity = Math.Min(p.Quantity, RemainingLiquidity(q.Ticker));
             if (quantity == 0) { actions.Add($"UNFILLED_EXIT:{q.Ticker}:liquidity"); continue; }
             var price = q.Bid * (1 - costs.Slippage); var proceeds = quantity * price * (1 - costs.Commission - sellTax);
@@ -159,7 +221,8 @@ public static class PaperEngine
             liquidityUsed[q.Ticker] = liquidityUsed.GetValueOrDefault(q.Ticker) + quantity;
             var reason = halted ? "risk-halt" : due ? "holding-period" : "stop";
             var trade = new Trade(p.Strategy.Id, q.Ticker, p.Signal.Time, p.Signal.Price, p.EntryTime, p.EntryPrice,
-                observation.ObservedAt, price, quantity, proceeds - paid, proceeds / paid - 1, reason, p.Signal.EvidenceHash, quantity == p.Quantity);
+                observation.ObservedAt, price, quantity, proceeds - paid, proceeds / paid - 1, reason, p.Signal.EvidenceHash, quantity == p.Quantity,
+                p.ShareUnitActionKeys, p.OriginalEntryQuantity, paid);
             fills.Add(new(trade, p.StopLoss, null, null, baseline ?? "unknown", observation.Source)); positions.Remove(p); actions.Add($"SELL:{q.Ticker}:{reason}");
             if (quantity < p.Quantity) { positions.Add(p with { Quantity = p.Quantity - quantity, Paid = p.Paid - paid }); actions.Add($"PARTIAL_EXIT:{q.Ticker}"); }
         }
@@ -168,10 +231,11 @@ public static class PaperEngine
             foreach (var signal in pending.OrderByDescending(s => s.Score).ThenBy(s => s.StrategyId, StringComparer.Ordinal).ThenBy(s => s.Ticker, StringComparer.Ordinal))
             {
                 if (!map.TryGetValue(signal.Ticker, out var q) || !q.Tradable || q.Time <= signal.Time || positions.Any(p => p.Strategy.Id == signal.StrategyId && p.Signal.Ticker == q.Ticker)) continue;
+                if (!ShareUnits.CanTrade(q.Ticker, date, observation.ObservedAt, changes)) continue;
                 var bar = history.Where(b => b.Ticker == q.Ticker).OrderBy(b => b.Date).Last();
                 if (bar.Date >= date || !bar.Member || date.DayNumber - bar.Date.DayNumber > 7) continue;
                 var price = q.Ask * (1 + costs.Slippage); var value = Mark();
-                decimal Exposure(Func<PaperPosition, bool> filter) => positions.Where(filter).Sum(p => p.Quantity * map[p.Signal.Ticker].Ask);
+                decimal Exposure(Func<PaperPosition, bool> filter) => positions.Where(filter).Sum(p => p.Quantity * EconomicQuote(p.Signal.Ticker, map[p.Signal.Ticker].Ask));
                 var capacity = new[] { cash / (1 + costs.Commission), value * risk.PositionCap - Exposure(p => p.Signal.Ticker == q.Ticker),
                     value * risk.StrategyCap - Exposure(p => p.Strategy.Id == signal.StrategyId), value * risk.ExposureCap - Exposure(_ => true),
                     value * risk.SectorCap - Exposure(p => p.Sector == q.Sector) }.Min();
@@ -180,7 +244,8 @@ public static class PaperEngine
                 var paid = quantity * price * (1 + costs.Commission); cash -= paid; turnover += quantity * price;
                 liquidityUsed[q.Ticker] = liquidityUsed.GetValueOrDefault(q.Ticker) + quantity;
                 var spec = state.Strategies.Single(s => s.Id == signal.StrategyId);
-                positions.Add(new(spec, signal, observation.ObservedAt, price, quantity, paid, price * (1 - risk.StopLoss), q.Sector)); actions.Add($"BUY:{q.Ticker}:{quantity}");
+                positions.Add(new(spec, signal, observation.ObservedAt, price, quantity, paid, price * (1 - risk.StopLoss), q.Sector,
+                    OriginalEntryQuantity: quantity, OriginalStopLoss: price * (1 - risk.StopLoss))); actions.Add($"BUY:{q.Ticker}:{quantity}");
             }
             pending = [];
         }
@@ -190,7 +255,8 @@ public static class PaperEngine
         if (observation.Kind == "close")
         {
             if (curve.Any(e => e.Date == date)) throw new ArgumentException("Repeated close.");
-            curve = curve.Append(new EquityPoint(date, equity, equity / dayStart - 1, positions.Sum(p => p.Quantity * map[p.Signal.Ticker].Bid) / Math.Max(1, equity))).ToArray();
+            curve = curve.Append(new EquityPoint(date, equity, equity / dayStart - 1,
+                positions.Sum(p => p.Quantity * EconomicQuote(p.Signal.Ticker, map[p.Signal.Ticker].Bid)) / Math.Max(1, equity))).ToArray();
         }
         var previousHash = state.Audit.LastOrDefault()?.Hash ?? "GENESIS";
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(previousHash + JsonSerializer.Serialize(observation) + JsonSerializer.Serialize(actions))));
@@ -198,17 +264,20 @@ public static class PaperEngine
         // File ingress cannot attest a feed; even an asserted VerifiedFeed flag is not trusted.
         return state with { Cash = cash, Peak = peak, DayStartEquity = dayStart, TradingDate = date, LastObservation = observation.ObservedAt,
             BaselineRegime = baseline, Halted = halted, VerifiedFeed = false, History = history, LifecycleEvents = lifecycle, PendingSignals = pending,
-            Positions = positions.ToArray(), Fills = fills.ToArray(), Equity = curve, Audit = audit, Turnover = turnover, LiquidityUsed = liquidityUsed };
+            Positions = positions.ToArray(), Fills = fills.ToArray(), Equity = curve, Audit = audit, Turnover = turnover, LiquidityUsed = liquidityUsed,
+            ShareUnitChanges = changes.Length == 0 ? null : changes, ShareInventoryCredits = credits.Length == 0 ? null : credits,
+            ShareUnitAdjustments = unitAdjustments.Count == 0 ? null : unitAdjustments.ToArray() };
     }
-    private static Signal[] Signals(Bar[] bars, StrategySpec[] specs, DateTimeOffset now, SecurityLifecycleEvent[]? lifecycle)
+    private static Signal[] Signals(Bar[] bars, StrategySpec[] specs, DateTimeOffset now, SecurityLifecycleEvent[]? lifecycle,
+        ShareUnitChange[]? changes)
     {
         var latestSession = bars.Max(b => b.Date);
         var listings = (lifecycle ?? []).Where(e => e.Kind == "LISTED").GroupBy(e => e.Ticker)
             .ToDictionary(g => g.Key, g => g.Max(e => e.Date));
         return specs.SelectMany(spec => bars.GroupBy(b => b.Ticker)
                 .Where(g => g.Max(b => b.Date) == latestSession)
-                .Select(g => new PriceStrategy(spec).Generate(g.Where(b => b.Date >= listings.GetValueOrDefault(g.Key, DateOnly.MinValue) && b.AvailableAt <= now)
-                    .OrderBy(b => b.Date).ToArray(), now)))
+                .Select(g => ShareUnits.GenerateSignal(spec, g.Where(b => b.Date >= listings.GetValueOrDefault(g.Key, DateOnly.MinValue) && b.AvailableAt <= now)
+                    .OrderBy(b => b.Date).ToArray(), DateOnly.FromDateTime(now.ToOffset(TimeSpan.FromHours(9)).DateTime), now, changes)))
             .Where(s => s != null).Cast<Signal>().ToArray();
     }
 

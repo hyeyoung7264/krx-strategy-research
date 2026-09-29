@@ -2,7 +2,8 @@ namespace Investment.Core;
 
 public sealed class BacktestEngine
 {
-    private sealed record Position(StrategySpec Strategy, Bar EntryBar, Signal Signal, int Quantity, decimal Price, decimal Paid, int EntryIndex);
+    private sealed record Position(StrategySpec Strategy, Bar EntryBar, Signal Signal, int Quantity, decimal Price, decimal Paid,
+        int EntryIndex, decimal CurrentStopLoss, decimal OriginalStopLoss, int InitialQuantity, string[] AppliedShareActionKeys);
 
     public RunResult Run(Dataset data, StrategySpec[] specs, DateOnly start, DateOnly end, Costs costs, Risk risk,
         decimal initial = 100_000_000m, string codeVersion = "unversioned")
@@ -26,6 +27,7 @@ public sealed class BacktestEngine
         var listings = (data.LifecycleEvents ?? []).Where(e => e.Kind == "LISTED")
             .GroupBy(e => e.Ticker).ToDictionary(g => g.Key, g => g.Select(e => e.Date).Order().ToArray());
         var holdings = new List<Position>(); var trades = new List<Trade>(); var curve = new List<EquityPoint>(); var events = new List<string>();
+        var adjustments = new List<ShareUnitAdjustment>();
         decimal cash = initial, previous = initial, peak = initial, turnover = 0;
         bool halted = false; string? baselineRegime = null;
         var first = Array.IndexOf(dates, start); var last = Array.IndexOf(dates, end);
@@ -37,6 +39,25 @@ public sealed class BacktestEngine
                 throw new InvalidOperationException("Held security disappeared without a verified settlement or corporate-action valuation; backtest stopped.");
             var prior = i == 0 ? null : byDate[dates[i - 1]];
             var decisionTime = Clock.Open(date).AddTicks(-1);
+            var openingTime = Clock.Open(date);
+            // Rights change economic holdings before marks, risk checks or any attempted execution, even while halted.
+            foreach (var change in (data.ShareUnitChanges ?? []).Where(c => c.EffectiveDate <= date && c.AvailableAt <= openingTime)
+                         .OrderBy(c => c.EffectiveDate).ThenBy(c => c.ActionKey, StringComparer.Ordinal))
+            {
+                for (var holdingIndex = 0; holdingIndex < holdings.Count; holdingIndex++)
+                {
+                    var position = holdings[holdingIndex];
+                    if (position.EntryBar.Ticker != change.Ticker || position.EntryBar.Date >= change.EffectiveDate ||
+                        position.AppliedShareActionKeys.Contains(change.ActionKey, StringComparer.Ordinal)) continue;
+                    var quantity = ShareUnits.AdjustQuantity(position.Quantity, change);
+                    var appliedKeys = position.AppliedShareActionKeys.Append(change.ActionKey).ToArray();
+                    var stop = ShareUnits.StopLoss(position.OriginalStopLoss,
+                        (data.ShareUnitChanges ?? []).Where(c => appliedKeys.Contains(c.ActionKey, StringComparer.Ordinal)));
+                    holdings[holdingIndex] = position with { Quantity = quantity, CurrentStopLoss = stop, AppliedShareActionKeys = appliedKeys };
+                    adjustments.Add(new(change.ActionKey, change.Ticker, openingTime, position.Strategy.Id, Clock.Open(position.EntryBar.Date),
+                        position.Quantity, quantity, position.CurrentStopLoss, stop, position.Paid, ShareUnits.Hash(change)));
+                }
+            }
             var regime = Regime(data, i - 1, decisionTime);
             if (baselineRegime == null && regime != "unknown") baselineRegime = regime;
             if (baselineRegime != null && regime != "unknown" && regime != baselineRegime && !halted)
@@ -46,20 +67,26 @@ public sealed class BacktestEngine
                 (1 - costs.Slippage) * (1 - costs.Commission - sellTax));
             decimal OpeningMark(Bar b)
             {
-                if (b.Open > 0) return b.Open;
+                if (b.Open > 0) return ShareUnits.EconomicPrice(b.Open, b.Ticker, b.Date, date, openingTime, data.ShareUnitChanges);
                 // A missing opening print cannot be valued at zero or today's not-yet-known close.
                 var known = history[b.Ticker].LastOrDefault(p => p.Date < date && p.AvailableAt <= decisionTime);
-                return known?.Close ?? throw new InvalidOperationException("No published prior close for opening valuation.");
+                if (known is null) throw new InvalidOperationException("No published prior close for opening valuation.");
+                return ShareUnits.EconomicPrice(known.Close, b.Ticker, known.Date, date, openingTime, data.ShareUnitChanges);
             }
+            decimal ClosingMark(Bar b) => ShareUnits.EconomicPrice(b.Close, b.Ticker, b.Date, date, Clock.Close(date), data.ShareUnitChanges);
             var liquidityUsed = new Dictionary<string, int>();
             int RemainingLiquidity(string ticker)
             {
                 var published = history[ticker].LastOrDefault(b => b.Date < date && date.DayNumber - b.Date.DayNumber <= 30 && b.AvailableAt <= decisionTime && b.Tradable && b.Volume > 0);
-                return published == null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, decimal.Floor(published.Volume * risk.Participation) - liquidityUsed.GetValueOrDefault(ticker)));
+                var volume = published == null ? 0 : ShareUnits.CapacityVolume(ticker, published.Date, date, published.Volume, openingTime, data.ShareUnitChanges);
+                return (int)Math.Min(int.MaxValue, Math.Max(0, decimal.Floor(volume * risk.Participation) - liquidityUsed.GetValueOrDefault(ticker)));
             }
             void Exit(Position p, decimal raw, string reason)
             {
                 var b = map[p.EntryBar.Ticker];
+                // Daily OHLC cannot establish whether an intraday stop occurred after a later inventory credit.
+                if (!ShareUnits.CanSell(p.AppliedShareActionKeys, data.ShareInventoryCredits, openingTime))
+                { events.Add($"{date:yyyy-MM-dd}: UNFILLED_EXIT {b.Ticker}; share inventory credit unavailable at open"); return; }
                 var quantity = Math.Min(p.Quantity, RemainingLiquidity(b.Ticker));
                 if (quantity == 0) { events.Add($"{date:yyyy-MM-dd}: UNFILLED_EXIT {b.Ticker}; prior published liquidity budget exhausted"); return; }
                 var price = raw * (1 - costs.Slippage);
@@ -69,7 +96,8 @@ public sealed class BacktestEngine
                 cash += proceeds; turnover += amount;
                 trades.Add(new(p.Strategy.Id, b.Ticker, p.Signal.Time, p.Signal.Price, Clock.Open(p.EntryBar.Date), p.Price,
                     reason == "stop" ? Clock.Close(date) : Clock.Open(date), price, quantity, proceeds - paid,
-                    proceeds / paid - 1, reason, p.Signal.EvidenceHash, quantity == p.Quantity));
+                    proceeds / paid - 1, reason, p.Signal.EvidenceHash, quantity == p.Quantity,
+                    p.AppliedShareActionKeys.Length == 0 ? null : p.AppliedShareActionKeys.ToArray(), p.InitialQuantity, paid));
                 holdings.Remove(p);
                 if (quantity < p.Quantity)
                 {
@@ -79,14 +107,14 @@ public sealed class BacktestEngine
             }
             // Tradable must represent point-in-time execution eligibility (including suspension/limit locks).
             // Never infer an opening fill decision from the future full-session high/low/volume.
-            bool Executable(Bar b) => b.Tradable && b.Open > 0;
+            bool Executable(Bar b) => b.Tradable && b.Open > 0 && ShareUnits.CanTrade(b.Ticker, date, openingTime, data.ShareUnitChanges);
             foreach (var p in holdings.ToArray())
             {
                 var b = map[p.EntryBar.Ticker];
                 if (!Executable(b)) continue;
                 if (halted || !b.Member || i - p.EntryIndex >= p.Strategy.HoldDays)
                     Exit(p, b.Open, halted ? "risk-halt" : !b.Member ? "universe-exit" : "holding-period");
-                else if (b.Open <= p.Price * (1 - risk.StopLoss)) Exit(p, b.Open, "gap-stop");
+                else if (b.Open <= p.CurrentStopLoss) Exit(p, b.Open, "gap-stop");
             }
 
             var openingEquity = NetMark(OpeningMark);
@@ -109,7 +137,7 @@ public sealed class BacktestEngine
                         : DateOnly.MinValue;
                     var past = history[ticker].Where(b => b.Date >= latestListing && b.Date <= dates[i - 1] && b.AvailableAt <= now).ToArray();
                     if (past.Length == 0 || past[^1].Date != dates[i - 1]) continue;
-                    var signal = new PriceStrategy(spec).Generate(past, now);
+                    var signal = ShareUnits.GenerateSignal(spec, past, date, now, data.ShareUnitChanges);
                     if (signal != null) candidates.Add((spec, signal));
                 }
                 foreach (var candidate in candidates.OrderByDescending(c => c.Signal.Score).ThenBy(c => c.Spec.Id, StringComparer.Ordinal).ThenBy(c => c.Signal.Ticker, StringComparer.Ordinal))
@@ -133,25 +161,26 @@ public sealed class BacktestEngine
                     var paid = quantity * price * (1 + costs.Commission);
                     cash -= paid; turnover += quantity * price;
                     liquidityUsed[b.Ticker] = liquidityUsed.GetValueOrDefault(b.Ticker) + quantity;
-                    holdings.Add(new(candidate.Spec, b, candidate.Signal, quantity, price, paid, i));
+                    var stop = price * (1 - risk.StopLoss);
+                    holdings.Add(new(candidate.Spec, b, candidate.Signal, quantity, price, paid, i, stop, stop, quantity, []));
                 }
             }
             foreach (var p in holdings.ToArray())
             {
                 var b = map[p.EntryBar.Ticker];
-                if (Executable(b) && b.Low <= p.Price * (1 - risk.StopLoss)) Exit(p, Math.Min(b.Open, p.Price * (1 - risk.StopLoss)), "stop");
+                if (Executable(b) && b.Low <= p.CurrentStopLoss) Exit(p, Math.Min(b.Open, p.CurrentStopLoss), "stop");
             }
             // Mark open positions at estimated net liquidation value; unrealized losses are not omitted.
-            var closeEquity = NetMark(b => b.Close); peak = Math.Max(peak, closeEquity);
+            var closeEquity = NetMark(ClosingMark); peak = Math.Max(peak, closeEquity);
             var daily = closeEquity / previous - 1;
             if (!halted && (daily <= -risk.DailyLoss || 1 - closeEquity / peak >= risk.Drawdown))
             { halted = true; events.Add($"{date:yyyy-MM-dd}: CLOSE_RISK_LIMIT; next tradable open exit"); }
-            curve.Add(new(date, closeEquity, daily, holdings.Sum(p => p.Quantity * map[p.EntryBar.Ticker].Close) / Math.Max(1, closeEquity)));
+            curve.Add(new(date, closeEquity, daily, holdings.Sum(p => p.Quantity * ClosingMark(map[p.EntryBar.Ticker])) / Math.Max(1, closeEquity)));
             previous = closeEquity;
         }
         var metrics = Statistics.Measure(curve, trades, initial, turnover, holdings.Count);
         return new(Guid.NewGuid().ToString("N"), data.Hash, data.Synthetic, start, end, specs, costs, risk, initial, metrics,
-            curve.ToArray(), trades.ToArray(), events.ToArray(), codeVersion);
+            curve.ToArray(), trades.ToArray(), events.ToArray(), codeVersion, ShareUnitAdjustments: adjustments.Count == 0 ? null : adjustments.ToArray());
     }
 
     public static string Regime(Dataset data, int throughIndex, DateTimeOffset? knownAt = null)
@@ -162,7 +191,7 @@ public sealed class BacktestEngine
         var end = dates[throughIndex]; var begin = dates[throughIndex - 20]; var now = knownAt ?? Clock.Close(end);
         var moves = data.Bars.Where(b => b.Date >= begin && b.Date <= end).GroupBy(b => b.Ticker)
             .Where(g => g.Count() == 21 && g.All(b => b.Member && b.Tradable && b.Volume > 0 && b.AvailableAt <= now))
-            .Select(g => { var a = g.OrderBy(b => b.Date).ToArray(); return a[^1].Close / a[0].Close - 1; }).ToArray();
+            .Select(g => { var a = ShareUnits.SignalHistory(g.OrderBy(b => b.Date).ToArray(), end, now, data.ShareUnitChanges); return a[^1].Close / a[0].Close - 1; }).ToArray();
         if (moves.Length == 0) return "unknown";
         var average = moves.Average();
         return average > .03m ? "bull" : average < -.03m ? "bear" : "sideways";

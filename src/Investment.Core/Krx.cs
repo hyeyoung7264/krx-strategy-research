@@ -15,7 +15,11 @@ public sealed record UniverseRow(string Ticker, DateOnly Date, string Sector, bo
     DateTimeOffset AvailableAt, bool CorporateAction = false);
 public sealed record KrxManifest(string Version, string[] SnapshotFiles, DateOnly[] Sessions, UniverseRow[] Universe,
     bool PointInTimeReviewed = false, string ReviewEvidence = "",
-    SecurityLifecycleEvent[]? LifecycleEvents = null);
+    SecurityLifecycleEvent[]? LifecycleEvents = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareUnitChange[]? ShareUnitChanges = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareInventoryCredit[]? ShareInventoryCredits = null);
 
 public sealed class KrxClient(HttpClient http, Func<DateTimeOffset>? clock = null)
 {
@@ -102,7 +106,8 @@ public static class KrxDatasetBuilder
                 row.Volume.Value, row.TradingValue.Value, u.Tradable, u.Member, u.CorporateAction);
         }).OrderBy(b => b.Date).ThenBy(b => b.Ticker, StringComparer.Ordinal).ToArray();
         var data = new Dataset("KRX approved API; manifest=" + manifest.Version + "; review=" + manifest.ReviewEvidence, false,
-            manifest.PointInTimeReviewed, bars, manifest.Sessions, manifest.LifecycleEvents);
+            manifest.PointInTimeReviewed, bars, manifest.Sessions, manifest.LifecycleEvents,
+            manifest.ShareUnitChanges, manifest.ShareInventoryCredits);
         data.Validate(); return data;
     }
 }

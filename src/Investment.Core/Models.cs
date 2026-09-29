@@ -10,7 +10,11 @@ public sealed record Bar(string Ticker, string Sector, DateOnly Date, DateTimeOf
 public sealed record SecurityLifecycleEvent(string Ticker, DateOnly Date, string Kind, DateTimeOffset AvailableAt, string Evidence);
 public sealed record Dataset(string Source, bool Synthetic, bool PointInTimeCertified, Bar[] Bars, DateOnly[]? Sessions = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    SecurityLifecycleEvent[]? LifecycleEvents = null)
+    SecurityLifecycleEvent[]? LifecycleEvents = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareUnitChange[]? ShareUnitChanges = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareInventoryCredit[]? ShareInventoryCredits = null)
 {
     [System.Text.Json.Serialization.JsonIgnore]
     public string Hash => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(this))));
@@ -19,6 +23,7 @@ public sealed record Dataset(string Source, bool Synthetic, bool PointInTimeCert
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(Source) || Bars.Length == 0) throw new ArgumentException("Missing dataset/source.");
+        ShareUnits.Validate(ShareUnitChanges, ShareInventoryCredits, Bars, LifecycleEvents);
         if (Bars.GroupBy(b => (b.Ticker, b.Date)).Any(g => g.Count() != 1)) throw new ArgumentException("Duplicate bar.");
         foreach (var b in Bars)
         {
@@ -31,7 +36,6 @@ public sealed record Dataset(string Source, bool Synthetic, bool PointInTimeCert
                 b.Volume < 0 || b.TradingValue < 0 || !(priced || noTrade))
                 throw new ArgumentException("Invalid OHLCV.");
             if (b.AvailableAt < Clock.Close(b.Date)) throw new ArgumentException("Daily bar available before close.");
-            if (b.CorporateAction) throw new ArgumentException("Corporate action requires explicit point-in-time position adjustment; unsupported dataset.");
         }
         // Absence outside a security's listed interval needs an explicit event; gaps inside it are errors.
         var dates = Dates;
@@ -125,7 +129,14 @@ public sealed class PriceStrategy(StrategySpec spec) : IStrategy
 }
 public sealed record Trade(string StrategyId, string Ticker, DateTimeOffset SignalTime, decimal SignalPrice,
     DateTimeOffset EntryTime, decimal EntryPrice, DateTimeOffset ExitTime, decimal ExitPrice, int Quantity,
-    decimal NetProfit, decimal Return, string Reason, string EvidenceHash, bool CompletesPosition = true);
+    decimal NetProfit, decimal Return, string Reason, string EvidenceHash, bool CompletesPosition = true,
+    // Quantity is in exit-date units; immutable entry prices remain in original fill units.
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string[]? ShareUnitActionKeys = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    int? OriginalEntryQuantity = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    decimal? AllocatedCost = null);
 public sealed record EquityPoint(DateOnly Date, decimal Equity, decimal DailyReturn, decimal Exposure);
 public sealed record Metrics(decimal TotalReturn, double? Cagr, decimal AverageDailyReturn, decimal WinRate,
     decimal? ProfitFactor, decimal AverageProfit, decimal AverageLoss, decimal ExpectedValuePerTrade,
@@ -133,4 +144,6 @@ public sealed record Metrics(decimal TotalReturn, double? Cagr, decimal AverageD
     double AverageHoldingDays, int OpenPositions);
 public sealed record RunResult(string Id, string DataHash, bool Synthetic, DateOnly Start, DateOnly End,
     StrategySpec[] Strategies, Costs Costs, Risk Risk, decimal InitialCapital, Metrics Metrics,
-    EquityPoint[] Equity, Trade[] Trades, string[] Events, string CodeVersion, Metrics? GrossMetrics = null);
+    EquityPoint[] Equity, Trade[] Trades, string[] Events, string CodeVersion, Metrics? GrossMetrics = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ShareUnitAdjustment[]? ShareUnitAdjustments = null);

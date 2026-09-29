@@ -113,16 +113,20 @@ public sealed class AiResearchWorker(string directory)
         if (data.Dates.Length < plan.TrainSessions + plan.ValidationSessions + 2 * plan.TestSessions + plan.HoldoutSessions)
             throw new ArgumentException("AI exploration requires the research calendar; it never consumes reserved holdout.");
         var dates = data.Dates.Take(plan.TrainSessions).ToArray(); var set = dates.ToHashSet();
+        var knownAt = Clock.Open(data.Dates[plan.TrainSessions]).AddTicks(-1);
         // Source labels and full-data hashes are excluded from the model prompt.
         // Preserve the listing boundaries that explain gaps inside this prefix, without
         // including future lifecycle notices in its content hash or model input.
         var bars = data.Bars.Where(b => set.Contains(b.Date)).ToArray();
+        if (bars.Any(b => b.AvailableAt > knownAt))
+            throw new ArgumentException("AI training observations must be available before the next validation session opens.");
         var tickers = bars.Select(b => b.Ticker).ToHashSet(StringComparer.Ordinal);
         // A left-boundary delisting can belong to a ticker whose next listing occurs
         // wholly after training. It describes no security observations in this prefix.
         var events = data.LifecycleEvents?.Where(e => set.Contains(e.Date) && tickers.Contains(e.Ticker)).ToArray();
+        var units = ShareUnitPrefix.Select(data, tickers, dates[^1], knownAt);
         var training = new Dataset("TRAINING_ONLY", data.Synthetic, false,
-            bars, dates, events is { Length: > 0 } ? events : null);
+            bars, dates, events is { Length: > 0 } ? events : null, units.Changes, units.Credits);
         // Reject unusable training before a paid provider request or attempt is recorded.
         training.Validate();
         return training;
@@ -136,6 +140,8 @@ public sealed class AiResearchWorker(string directory)
         var store = new EvidenceStore(directory); var id = Guid.NewGuid().ToString("N"); var rounds = new List<AiRound>();
         var status = "REQUEST_BUDGET_EXHAUSTED"; string? error = null; var seen = new HashSet<string>();
         var sessionOffsets = training.Dates.Select((date, offset) => (date, offset)).ToDictionary(x => x.date, x => x.offset);
+        var trainingKnownAt = Clock.Open(data.Dates[plan.TrainSessions]).AddTicks(-1);
+        var economicDate = training.Dates[^1];
         // Cost schedules can contain real dates, source labels and future policy. Expose
         // only the rates applied to this anonymous training calendar.
         var promptCosts = new { costs.Commission, costs.Slippage,
@@ -155,17 +161,23 @@ public sealed class AiResearchWorker(string directory)
             {
                 // A reused ticker is not a continuous security price history. Reset both
                 // normalizations and preserve the shared anonymous calendar in each episode.
-                var basePrice = bars[0].Close; var baseVolume = Math.Max(1, bars[0].Volume);
+                // A later reuse of the same ticker must not change an earlier listing's units.
+                var episodeChanges = training.ShareUnitChanges?.Where(c => c.Ticker == bars[0].Ticker &&
+                    c.EffectiveDate <= bars[^1].Date).ToArray();
+                var comparison = ShareUnits.SignalHistory(bars.ToArray(), economicDate, trainingKnownAt, episodeChanges);
+                var volumes = bars.Select(b => ShareUnits.CapacityVolume(b.Ticker, b.Date, economicDate,
+                    b.Volume, trainingKnownAt, episodeChanges)).ToArray();
+                var basePrice = comparison[0].Close; var baseVolume = volumes[0] > 0 ? volumes[0] : 1m;
                 return new { SessionOffsets = bars.Select(b => sessionOffsets[b.Date]).ToArray(),
-                    CloseIndex = bars.Select(b => b.Close / basePrice).ToArray(),
-                    VolumeIndex = bars.Select(b => (decimal)b.Volume / baseVolume).ToArray() };
+                    CloseIndex = comparison.Select(b => b.Close / basePrice).ToArray(),
+                    VolumeIndex = volumes.Select(volume => volume / baseVolume).ToArray() };
             }).ToArray() };
         }).ToArray();
         for (var index = 0; index < settings.MaximumRequests; index++)
         {
             if (ct.IsCancellationRequested) { status = "CANCELLED"; break; }
             var input = JsonSerializer.Serialize(new { TrainingOnly = true, TrainingSessions = sessionOffsets.Count,
-                SeriesSemantics = "SessionOffsets share a zero-based training exchange-session calendar. Each segment is a separate listing episode with independently normalized prices and volume; never compute returns across segments or treat omitted sessions as consecutive observations.",
+                SeriesSemantics = "SessionOffsets share a zero-based training exchange-session calendar. Each segment is a separate listing episode with independently normalized prices and volume, expressed in the final training session's economic share units using only terms known before validation opens. Raw observations are preserved separately. Never compute returns across segments or treat omitted sessions as consecutive observations.",
                 Series = series, Costs = promptCosts, Risk = risk,
                 Feedback = rounds.SelectMany(r => r.Feedback).ToArray() });
             if (input.Length > settings.MaximumInputCharacters) { status = "INPUT_BUDGET_EXCEEDED"; break; }

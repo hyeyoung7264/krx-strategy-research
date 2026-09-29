@@ -52,9 +52,14 @@ public sealed class PaperJournal(string directory)
         if (state.Audit.Length != 0 || string.IsNullOrWhiteSpace(state.CodeVersion) || state.InitialCapital <= 0 ||
             state.ResearchCandidateCount < Math.Max(2, state.Strategies.Length) || state.Strategies.Length == 0 ||
             state.Positions.Length != 0 || state.Fills.Length != 0 || state.Equity.Length != 0 || state.Turnover != 0 ||
+            state.ShareUnitAdjustments is { Length: > 0 } ||
             state.TradingDate != null || state.Cash != state.InitialCapital || state.Peak != state.InitialCapital || state.DayStartEquity != state.InitialCapital)
             throw new ArgumentException("New paper session requires versioned genesis, frozen research candidate count and empty trading ledger.");
         state.Costs.Validate(); state.Risk.Validate();
+        ShareUnits.Validate(state.ShareUnitChanges, state.ShareInventoryCredits, state.History, state.LifecycleEvents);
+        if ((state.ShareUnitChanges ?? []).Any(c => c.AvailableAt > state.LastObservation) ||
+            (state.ShareInventoryCredits ?? []).Any(c => c.AvailableAt > state.LastObservation))
+            throw new ArgumentException("Paper genesis cannot contain unobserved share-unit or inventory evidence.");
         foreach (var strategy in state.Strategies) strategy.Validate();
     }
     private void Verify(PaperState state)
