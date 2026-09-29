@@ -14,6 +14,7 @@ public sealed class CohortAgent
         DateTimeOffset? hypothesesCreatedAt = null)
     {
         data.Validate(); plan.Validate(); costs.Validate(); risk.Validate();
+        costs.RequireCoverage(data.Dates);
         if (candidates.Length > 100 || candidates.Select(c => c.Id).Distinct().Count() != candidates.Length)
             throw new ArgumentException("Register at most 100 unique candidates before cohort evaluation.");
         foreach (var spec in candidates) spec.Validate();

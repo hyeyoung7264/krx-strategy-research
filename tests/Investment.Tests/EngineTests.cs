@@ -135,6 +135,15 @@ public sealed class EngineTests
         data.Validate();
         Assert.Throws<InvalidOperationException>(() => Run(data));
     }
+    [Fact] public void ExplicitListingOnFirstSessionIsValid()
+    {
+        var data = Prices(100, 101, 102);
+        var first = data.Dates[0];
+        var bounded = data with { Sessions = data.Dates, PointInTimeCertified = true,
+            LifecycleEvents = [new("A", first, "LISTED", Clock.Open(first).AddDays(-1), "listing-notice")] };
+        bounded.Validate();
+        Assert.Equal(Run(data).Equity, Run(bounded).Equity);
+    }
     [Fact] public void RelistedTickerDoesNotReuseItsEarlierPriceHistory()
     {
         var original = Prices(100, 110, 120, 100, 100, 110, 120, 130, 140);

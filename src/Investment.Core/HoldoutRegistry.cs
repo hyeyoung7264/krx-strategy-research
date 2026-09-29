@@ -20,6 +20,7 @@ public sealed class HoldoutRegistry(string directory)
         if (mode == "cohort" && (candidates.GroupBy(s => s.Family).Count() < 2 || candidates.GroupBy(s => s.Family).Any(g => g.Count() < 2)))
             throw new ArgumentException("Register at least two candidates per family for cohort research.");
         var dates = data.Dates;
+        costs.RequireCoverage(dates);
         if ((long)dates.Length < (long)plan.TrainSessions + plan.ValidationSessions + 2L * plan.TestSessions + plan.HoldoutSessions)
             throw new ArgumentException("Insufficient dates for two forward folds and holdout; reservation not created.");
         var holdout = dates.TakeLast(plan.HoldoutSessions).ToArray();

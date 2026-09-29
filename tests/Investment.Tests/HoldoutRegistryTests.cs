@@ -48,6 +48,27 @@ public sealed class HoldoutRegistryTests
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
+    [Fact] public void IncompleteTaxScheduleDoesNotConsumeUnseenHoldout()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "holdout-registry-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var data = Data(); var candidates = new BaselineHypotheses().Generate();
+            var dates = data.Dates;
+            var rows = dates.Select(d => new SellTaxSession(d, d.AddDays(2), .002m, "fixture only")).ToArray();
+            var incomplete = new Costs(TaxSchedule: new("fixture only", rows[..^1]));
+            var registry = new HoldoutRegistry(root);
+            var error = Assert.Throws<ArgumentException>(() => registry.Reserve(data, candidates, Plan, incomplete, new(), "v1", "cohort", DateTimeOffset.UtcNow));
+            Assert.Contains("Missing explicit sell-tax", error.Message);
+            Assert.False(Directory.Exists(root));
+            Assert.Throws<ArgumentException>(() => new ResearchAgent().Run(data, candidates, Plan, incomplete, new(), "v1"));
+            Assert.Throws<ArgumentException>(() => new CohortAgent().Run(data, candidates, Plan, incomplete, new(), "v1"));
+            var complete = new Costs(TaxSchedule: new("fixture only", rows));
+            registry.Reserve(data, candidates, Plan, complete, new(), "v1", "cohort", DateTimeOffset.UtcNow);
+            Assert.Single(Directory.GetFiles(root, "seal-*.json"));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
     [Fact] public async Task ConcurrentReservationsPublishOnlyOneOverlappingStudy()
     {
         var root = Path.Combine(Path.GetTempPath(), "holdout-registry-" + Guid.NewGuid().ToString("N"));

@@ -97,6 +97,8 @@ dotnet run --project src/Investment.Cli --no-restore -- research --dataset artif
 
 `config/ai.example.json`은 기본 비활성화이며 모델을 임의로 선택하지 않습니다. 본인 계정에서 사용할 모델과 요청·출력 토큰·입력 길이 한도를 검토한 로컬 설정을 준비하고 `OPENAI_API_KEY`를 환경변수에 넣어야 실제 호출할 수 있습니다. 요청/토큰 제한은 금액 상한과 같지 않습니다. 키는 기록하지 않으며 예시 키 설정 스크립트도 OPENAI_API_KEY를 지원합니다.
 
+학습 자료를 자를 때 해당 구간의 상장·폐지 사건을 보존하고, AI 호출 전에 데이터와 비용표 범위를 검증합니다. 모델에는 실제 날짜 대신 공동 학습 달력의 세션 순번을 제공합니다. 재상장 구간은 별도 가격·거래량 기준으로 정규화하여 이전 종목의 가격 점프를 수익으로 해석하지 않도록 합니다. 날짜별 비용표도 학습 순번과 세율만 전달하며 실제 날짜·근거·미래 구간은 제외합니다.
+
 ```powershell
 dotnet run --project src/Investment.Cli --no-restore -- ai-explore --dataset data/private/dataset.json --ai-config data/private/ai.json
 dotnet run --project src/Investment.Cli --no-restore -- ai-cohort --dataset data/private/dataset.json --ai-config data/private/ai.json
@@ -128,6 +130,8 @@ dotnet run --project src/Investment.Cli --no-restore -- paper-evaluate --state p
 
 일봉 백테스트의 손실 한도는 중단 trigger입니다. gap·정지·가격제한폭 때문에 손실 상한을 보장할 수 없습니다. 일봉 stop 체결은 OHLC 근사이며 정확한 체결시각/호가 대기/장중 유동성을 증명하지 못합니다. 시가 크기 산정에는 이미 공개된 최근 거래일의 거래량만 사용합니다(30일 이상 오래된 값은 제외). 당일 high/low/거래량에서 시가 체결 가능 여부를 역추론하지 않습니다. 거래정지·가격제한 등 시점별 체결 가능 상태는 별도 입력인 Tradable로 제공해야 합니다. 양 엔진은 종목별 일일 공유 participation 예산에서 매수/매도와 부분체결을 처리하며 미체결 잔량을 유지합니다. 이는 이전 거래량 기반 근사이며 실제 주문 대기열/호가 잔량/체결량의 증거는 아닙니다. 나누어 청산한 포지션은 최종 청산 이후 하나의 종료 거래로 집계합니다. 비용/slippage 민감도·실제 시세로 보정하기 전 실전 유효성을 인정하지 않습니다. 장부의 미청산 포지션은 추정 순청산가치로 평가해 손실을 숨기지 않습니다.
 
+`Costs.TaxSchedule`로 거래일·결제일·총매도세·근거를 명시한 날짜별 표를 사용할 수 있습니다. 표가 있으면 누락 날짜에 고정 세율을 대신 쓰지 않고 중단하며 매도 체결과 추정 순청산가치에 같은 요율을 적용합니다. 기본 고정 비용은 진단용이고 승인 정책이 아닙니다. [공식 근거와 비용표 형식](docs/cost-policy.md)을 참고하세요.
+
 Regime은 과거 20세션의 연속 구성종목 equal-weight 가격 변화 proxy(bull >3%, bear <-3%, 그 외 sideways)입니다. 기준이 바뀌면 새 진입을 중단하고 거래 가능 시 청산합니다. 산업별·변동성별 regime와 정교한 변화점 모델, 포트폴리오 상관/공통 위험 요인 분석은 후속 작업입니다.
 
 ## KRX 공식 일봉 연결
@@ -145,6 +149,15 @@ dotnet run --project src/Investment.Cli --no-restore -- krx-build --manifest con
 `krx-fetch`는 전체 시장 원본과 SHA-256, 조회 시각, 종목명, OHLCV, 거래대금, 시가총액, 상장주식수를 보존합니다. `krx-basic-fetch`는 날짜별 종목기본정보, `krx-index-fetch`는 이름이 구분된 지수 일별시세 원본을 보존합니다. 각 서비스는 별도 승인이 필요합니다. 한 번에 한 거래일만 조회합니다. 빈 응답을 거래소 휴장일로 단정하지 않습니다. placeholder `-`는 누락값이며 0이나 전일 가격으로 바꾸지 않습니다. KRX의 거래량 0·시고저가 0·잔존 종가 행은 원문대로 보존하고 0원 시가 체결을 금지합니다. [실제 응답의 초기 품질 감사](docs/krx-data-audit.md)를 참조하세요.
 
 여러 날짜의 원본을 수집하려면 `KrxCollectionPlan` JSON에 시장과 중복 없이 오름차순인 날짜 목록을 명시합니다. `config/krx-collection.example.json`은 요청 형식 예시이며 실제 거래일을 인증하지 않습니다. 주말을 제외해 자동 생성한 달력을 연구용 거래일로 사용하지 않습니다.
+
+공식 휴장일 공개 화면을 읽는 `krx-calendar`는 연도별 원본과 후보 거래일을 보존합니다. 지원되는 Open API 계약과는 구분하며, 이 달력만으로 가격 제공시각이나 결제일을 인증하지 않습니다. `krx-audit`는 선택한 원본 revision과 요청 날짜를 대조해 누락·빈 응답·잘못된 가격, 종목 출현/소멸, 주식 수 변화, 큰 미조정 가격 변화를 보고합니다. 변화는 검토 요청이며 상장폐지·분할을 자동 확정하는 사건이 아닙니다. [공식 역사 자료 경로와 접근 한계](docs/historical-data-sources.md)를 참고하세요.
+
+```powershell
+dotnet run --project src/Investment.Cli --no-restore -- krx-calendar --year 2026 --start 2026-09-01 --end 2026-09-28
+dotnet run --project src/Investment.Cli --no-restore -- krx-audit --plan config/my-audit.json
+```
+
+감사 계획 형식은 `config/krx-audit.example.json`에 있습니다. 같은 날짜의 여러 원본 revision을 자동 선택하지 않으며, 누락/빈 날짜를 건너뛴 연속 비교도 하지 않습니다. 감사 결과는 연구 데이터 시점 인증이나 수익성 판정이 아닙니다.
 
 ```powershell
 dotnet run --project src/Investment.Cli --no-restore -- krx-collect --plan config/my-collection.json --max-requests 5 --interval-seconds 1

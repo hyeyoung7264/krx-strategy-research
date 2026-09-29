@@ -20,6 +20,7 @@ public sealed class BacktestEngine
         foreach (var s in specs) s.Validate();
         var dates = data.Dates;
         if (start > end || !dates.Contains(start) || !dates.Contains(end)) throw new ArgumentException("Invalid period.");
+        costs.RequireCoverage(dates.Where(date => date >= start && date <= end));
         var byDate = data.Bars.GroupBy(b => b.Date).ToDictionary(g => g.Key, g => g.OrderBy(b => b.Ticker, StringComparer.Ordinal).ToArray());
         var history = data.Bars.GroupBy(b => b.Ticker).ToDictionary(g => g.Key, g => g.OrderBy(b => b.Date).ToArray());
         var listings = (data.LifecycleEvents ?? []).Where(e => e.Kind == "LISTED")
@@ -31,6 +32,7 @@ public sealed class BacktestEngine
         for (var i = first; i <= last; i++)
         {
             var date = dates[i]; var today = byDate[date]; var map = today.ToDictionary(b => b.Ticker);
+            var sellTax = costs.SellTaxOn(date);
             if (holdings.Any(p => !map.ContainsKey(p.EntryBar.Ticker)))
                 throw new InvalidOperationException("Held security disappeared without a verified settlement or corporate-action valuation; backtest stopped.");
             var prior = i == 0 ? null : byDate[dates[i - 1]];
@@ -40,8 +42,8 @@ public sealed class BacktestEngine
             if (baselineRegime != null && regime != "unknown" && regime != baselineRegime && !halted)
             { halted = true; events.Add($"{date:yyyy-MM-dd}: REGIME_CHANGE {baselineRegime}->{regime}; halt and exit when tradable"); }
 
-            decimal Mark(Func<Bar, decimal> price) => cash + holdings.Sum(p => p.Quantity * price(map[p.EntryBar.Ticker]));
-            decimal LiquidationMark() => cash + holdings.Sum(p => p.Quantity * map[p.EntryBar.Ticker].Close * (1 - costs.Slippage) * (1 - costs.Commission - costs.SellTax));
+            decimal NetMark(Func<Bar, decimal> price) => cash + holdings.Sum(p => p.Quantity * price(map[p.EntryBar.Ticker]) *
+                (1 - costs.Slippage) * (1 - costs.Commission - sellTax));
             decimal OpeningMark(Bar b)
             {
                 if (b.Open > 0) return b.Open;
@@ -61,7 +63,7 @@ public sealed class BacktestEngine
                 var quantity = Math.Min(p.Quantity, RemainingLiquidity(b.Ticker));
                 if (quantity == 0) { events.Add($"{date:yyyy-MM-dd}: UNFILLED_EXIT {b.Ticker}; prior published liquidity budget exhausted"); return; }
                 var price = raw * (1 - costs.Slippage);
-                var amount = quantity * price; var proceeds = amount * (1 - costs.Commission - costs.SellTax);
+                var amount = quantity * price; var proceeds = amount * (1 - costs.Commission - sellTax);
                 var paid = p.Paid * quantity / p.Quantity;
                 liquidityUsed[b.Ticker] = liquidityUsed.GetValueOrDefault(b.Ticker) + quantity;
                 cash += proceeds; turnover += amount;
@@ -87,7 +89,7 @@ public sealed class BacktestEngine
                 else if (b.Open <= p.Price * (1 - risk.StopLoss)) Exit(p, b.Open, "gap-stop");
             }
 
-            var openingEquity = Mark(OpeningMark);
+            var openingEquity = NetMark(OpeningMark);
             if (openingEquity / previous - 1 <= -risk.DailyLoss || 1 - openingEquity / peak >= risk.Drawdown)
             {
                 halted = true; events.Add($"{date:yyyy-MM-dd}: OPEN_RISK_LIMIT; gaps can exceed limits");
@@ -116,7 +118,9 @@ public sealed class BacktestEngine
                     // Today's volume is NOT used to size an open fill. Capacity uses the previously published bar.
                     if (!b.Member || !Executable(b) || holdings.Any(p => p.Strategy.Id == candidate.Spec.Id && p.EntryBar.Ticker == b.Ticker)) continue;
                     var price = b.Open * (1 + costs.Slippage);
-                    var equity = Mark(OpeningMark);
+                    var equity = NetMark(OpeningMark);
+                    // Exposure remains the raw marked position value. Liquidation costs
+                    // reduce available equity, not the exposure already occupying a cap.
                     var exposure = holdings.Sum(p => p.Quantity * OpeningMark(map[p.EntryBar.Ticker]));
                     var strategyExposure = holdings.Where(p => p.Strategy.Id == candidate.Spec.Id).Sum(p => p.Quantity * OpeningMark(map[p.EntryBar.Ticker]));
                     var sectorExposure = holdings.Where(p => map[p.EntryBar.Ticker].Sector == b.Sector).Sum(p => p.Quantity * OpeningMark(map[p.EntryBar.Ticker]));
@@ -138,7 +142,7 @@ public sealed class BacktestEngine
                 if (Executable(b) && b.Low <= p.Price * (1 - risk.StopLoss)) Exit(p, Math.Min(b.Open, p.Price * (1 - risk.StopLoss)), "stop");
             }
             // Mark open positions at estimated net liquidation value; unrealized losses are not omitted.
-            var closeEquity = LiquidationMark(); peak = Math.Max(peak, closeEquity);
+            var closeEquity = NetMark(b => b.Close); peak = Math.Max(peak, closeEquity);
             var daily = closeEquity / previous - 1;
             if (!halted && (daily <= -risk.DailyLoss || 1 - closeEquity / peak >= risk.Drawdown))
             { halted = true; events.Add($"{date:yyyy-MM-dd}: CLOSE_RISK_LIMIT; next tradable open exit"); }

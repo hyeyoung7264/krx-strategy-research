@@ -9,7 +9,7 @@ try
     T Load<T>(string path) => JsonSerializer.Deserialize<T>(File.ReadAllText(path)) ?? throw new ArgumentException("Empty JSON.");
     void Print(object value) => Console.WriteLine(JsonSerializer.Serialize(value, DataFiles.Json));
     var command = args.FirstOrDefault() ?? "help";
-    var allowedOptions = new HashSet<string> { "--dataset", "--output", "--config", "--csv", "--source", "--start", "--end", "--corp-code", "--evidence", "--state", "--observation", "--persist", "--date", "--market", "--manifest", "--source-archive", "--archive", "--plan", "--max-requests", "--interval-seconds", "--ai-config" };
+    var allowedOptions = new HashSet<string> { "--dataset", "--output", "--config", "--csv", "--source", "--start", "--end", "--corp-code", "--evidence", "--state", "--observation", "--persist", "--date", "--year", "--market", "--manifest", "--source-archive", "--archive", "--plan", "--max-requests", "--interval-seconds", "--ai-config" };
     for (var i = 1; i < args.Length; i++)
     {
         if (!allowedOptions.Contains(args[i])) throw new ArgumentException("Unknown or duplicated positional argument; no live-order options exist.");
@@ -106,6 +106,29 @@ try
             Print(new { Path = Path.GetFullPath(Path.Combine(output, "krx-collections", result.PlanHash, "collection-" + result.Id + ".json")),
                 Receipt = result, Note = "Unreviewed raw collection only. Empty responses require review; no automatic retry or calendar inference." });
             return result.Status is "REQUEST_FAILED" or "CANCELLED" or "EMPTY_RESPONSE_REQUIRES_REVIEW" ? 2 : 0;
+        }
+        case "krx-calendar":
+        {
+            var year = int.Parse(Option("--year", ""), System.Globalization.CultureInfo.InvariantCulture);
+            using var client = new KrxCalendarClient();
+            var snapshot = await client.Year(year);
+            var from = DateOnly.Parse(Option("--start", $"{year}-01-01"), System.Globalization.CultureInfo.InvariantCulture);
+            var through = DateOnly.Parse(Option("--end", $"{year}-12-31"), System.Globalization.CultureInfo.InvariantCulture);
+            var dates = KrxCalendarClient.CandidateSessions(snapshot, from, through);
+            var snapshotPath = store.Save("krx-calendar", snapshot.Id, snapshot);
+            var candidatesPath = store.Save("krx-calendar-candidates", snapshot.Id, new { SnapshotPath = snapshotPath, From = from, Through = through, CandidateDates = dates,
+                Note = "Public holiday-screen candidates only; not certified historical publication timing, settlement dates, or intraday opening hours." });
+            Print(new { snapshotPath, candidatesPath, Holidays = snapshot.Holidays.Length, CandidateSessions = dates.Length });
+            break;
+        }
+        case "krx-audit":
+        {
+            var plan = Load<KrxAuditPlan>(Option("--plan", ""));
+            var report = KrxDataAudit.Run(plan.SnapshotFiles.Select(Load<KrxSnapshot>).ToArray(), plan.ExpectedDates, plan.Markets, DateTimeOffset.UtcNow);
+            Print(new { path = store.Save("krx-audit", report.Id, new { CodeVersion = code, Report = report }), report.Status,
+                Snapshots = report.Inputs.Length, Rows = report.Days.Sum(d => d.Rows), NoTradeRows = report.Days.Sum(d => d.NoTradeRows),
+                Issues = report.Issues.Length, Changes = report.Changes.GroupBy(c => c.Kind).ToDictionary(g => g.Key, g => g.Count()), report.Note });
+            break;
         }
         case "krx-build":
         {
@@ -289,6 +312,7 @@ try
                   paper-step --state JSON --observation JSON | paper-recover --state JSON
                   paper-evaluate --state JSON
                   krx-fetch --market KOSPI|KOSDAQ --date DATE | krx-build --manifest JSON
+                  krx-calendar --year YEAR [--start DATE --end DATE] | krx-audit --plan JSON
                   krx-basic-fetch --market KOSPI|KOSDAQ --date DATE
                   krx-index-fetch --market KOSPI|KOSDAQ --date DATE
                   krx-collect --plan JSON [--max-requests 5] [--interval-seconds 1]

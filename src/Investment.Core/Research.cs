@@ -28,7 +28,8 @@ public sealed class ResearchAgent
 {
     public ResearchResult Run(Dataset data, StrategySpec[] candidates, ResearchPlan plan, Costs costs, Risk risk, string codeVersion)
     {
-        data.Validate(); plan.Validate();
+        data.Validate(); plan.Validate(); costs.Validate(); risk.Validate();
+        costs.RequireCoverage(data.Dates);
         if (candidates.Length < 2 || candidates.Length > 100 || candidates.Select(c => c.Id).Distinct().Count() != candidates.Length) throw new ArgumentException("Register 2..100 unique candidates before accessing holdout.");
         var dates = data.Dates; var researchEnd = dates.Length - plan.HoldoutSessions;
         var foldLength = plan.TrainSessions + plan.ValidationSessions + plan.TestSessions;

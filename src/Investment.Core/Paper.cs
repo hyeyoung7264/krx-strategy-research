@@ -84,6 +84,7 @@ public static class PaperEngine
         if (observation.ObservedAt > now || now - observation.ObservedAt > TimeSpan.FromMinutes(5) || observation.ObservedAt <= state.LastObservation)
             throw new ArgumentException("Stale, replayed or future observation: historical replay is not paper trading.");
         var local = observation.ObservedAt.ToOffset(TimeSpan.FromHours(9)); var date = DateOnly.FromDateTime(local.DateTime);
+        var sellTax = state.Costs.SellTaxOn(date);
         if (local.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday || local.TimeOfDay < TimeSpan.FromHours(9) || local.TimeOfDay > new TimeSpan(15, 40, 0)) throw new ArgumentException("Outside regular session window.");
         if (observation.Kind == "open" && (local.TimeOfDay > new TimeSpan(9, 5, 0) || state.TradingDate >= date)) throw new ArgumentException("Invalid/repeated opening.");
         if (observation.Kind != "open" && state.TradingDate != date) throw new ArgumentException("Open event required before quotes/close.");
@@ -101,7 +102,7 @@ public static class PaperEngine
             var published = state.History.Where(b => b.Ticker == ticker && b.Date < date && date.DayNumber - b.Date.DayNumber <= 30 && b.AvailableAt < Clock.Open(date) && b.Tradable && b.Volume > 0).OrderBy(b => b.Date).LastOrDefault();
             return published == null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, decimal.Floor(published.Volume * risk.Participation) - liquidityUsed.GetValueOrDefault(ticker)));
         }
-        decimal Mark() => cash + positions.Sum(p => p.Quantity * map[p.Signal.Ticker].Bid * (1 - costs.Slippage) * (1 - costs.Commission - costs.SellTax));
+        decimal Mark() => cash + positions.Sum(p => p.Quantity * map[p.Signal.Ticker].Bid * (1 - costs.Slippage) * (1 - costs.Commission - sellTax));
         var equity = Mark(); var dayStart = observation.Kind == "open" ? state.Equity.LastOrDefault()?.Equity ?? state.InitialCapital : state.DayStartEquity;
         var peak = Math.Max(state.Peak, equity);
         if (equity / dayStart - 1 <= -risk.DailyLoss || 1 - equity / peak >= risk.Drawdown)
@@ -152,7 +153,7 @@ public static class PaperEngine
             if (!halted && !due && q.Bid > p.StopLoss) continue;
             var quantity = Math.Min(p.Quantity, RemainingLiquidity(q.Ticker));
             if (quantity == 0) { actions.Add($"UNFILLED_EXIT:{q.Ticker}:liquidity"); continue; }
-            var price = q.Bid * (1 - costs.Slippage); var proceeds = quantity * price * (1 - costs.Commission - costs.SellTax);
+            var price = q.Bid * (1 - costs.Slippage); var proceeds = quantity * price * (1 - costs.Commission - sellTax);
             var paid = p.Paid * quantity / p.Quantity;
             cash += proceeds; turnover += quantity * price;
             liquidityUsed[q.Ticker] = liquidityUsed.GetValueOrDefault(q.Ticker) + quantity;

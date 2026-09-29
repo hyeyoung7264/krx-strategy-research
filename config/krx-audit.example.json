@@ -1,0 +1,5 @@
+{
+  "SnapshotFiles": ["data/private/krx-kospi-20260922.json", "data/private/krx-kosdaq-20260922.json"],
+  "ExpectedDates": ["2026-09-22"],
+  "Markets": ["KOSPI", "KOSDAQ"]
+}

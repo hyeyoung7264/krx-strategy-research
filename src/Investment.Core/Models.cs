@@ -50,7 +50,9 @@ public sealed record Dataset(string Source, bool Synthetic, bool PointInTimeCert
         var present = Bars.GroupBy(b => b.Ticker).ToDictionary(g => g.Key, g => g.Select(b => b.Date).ToHashSet());
         foreach (var (ticker, rows) in present)
         {
-            var active = rows.Contains(dates[0]);
+            // At the left boundary, a supplied event describes the state before the first row.
+            var active = eventByKey.TryGetValue((ticker, dates[0]), out var firstChange)
+                ? firstChange.Kind == "DELISTED" : rows.Contains(dates[0]);
             foreach (var date in dates)
             {
                 if (eventByKey.TryGetValue((ticker, date), out var change))
@@ -70,9 +72,22 @@ public static class Clock
     public static DateTimeOffset Open(DateOnly d) => new(d.ToDateTime(new TimeOnly(9, 0)), TimeSpan.FromHours(9));
     public static DateTimeOffset Close(DateOnly d) => new(d.ToDateTime(new TimeOnly(15, 30)), TimeSpan.FromHours(9));
 }
-public sealed record Costs(decimal Commission = .00015m, decimal SellTax = .002m, decimal Slippage = .001m)
+public sealed record Costs(decimal Commission = .00015m, decimal SellTax = .002m, decimal Slippage = .001m,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    SellTaxSchedule? TaxSchedule = null)
 {
-    public void Validate() { if (Commission < 0 || SellTax < 0 || Slippage < 0 || Commission + SellTax >= 1 || Slippage >= 1) throw new ArgumentException("Invalid costs."); }
+    public void Validate()
+    {
+        if (Commission < 0 || SellTax < 0 || Slippage < 0 || Commission + SellTax >= 1 || Slippage >= 1)
+            throw new ArgumentException("Invalid costs.");
+        TaxSchedule?.Validate(Commission);
+    }
+    public decimal SellTaxOn(DateOnly tradeDate) => TaxSchedule?.RateOn(tradeDate) ?? SellTax;
+    public void RequireCoverage(IEnumerable<DateOnly> tradeDates)
+    {
+        if (TaxSchedule == null) return;
+        foreach (var date in tradeDates) _ = TaxSchedule.RateOn(date);
+    }
 }
 public sealed record Risk(decimal PositionCap = .10m, decimal StrategyCap = .40m, decimal ExposureCap = .80m,
     decimal SectorCap = .30m, decimal DailyLoss = .02m, decimal Drawdown = .10m, decimal StopLoss = .05m,
