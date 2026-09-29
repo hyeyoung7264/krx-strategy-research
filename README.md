@@ -31,6 +31,8 @@ dotnet run --project src/Investment.Cli --no-restore -- cohort-demo
 
 `config/research.json`의 비용·위험·통계 기준은 가상 연구 기본값입니다. 실제 시장/기간별 세금·증권사 수수료가 확인된 값이 아닙니다. `PolicyReviewed=false`로 승격을 막으며, Owner와 해당 조건을 검토하기 전 true로 변경하지 않습니다. 전략 비중은 최대 50%이며, paper 시작에는 같은 cohort의 서로 다른 전략군 두 버전과 결합 포트폴리오가 모두 통과해야 합니다. 비중 분산만으로 전략 간 상관이 낮다는 의미는 아닙니다.
 
+2024~2026년 매도세와 연말 체결·결제 경계의 공식 근거는 [거래비용 검토](docs/historical-cost-evidence.md)에 정리했습니다. 계좌 수수료·전체 결제표·원 단위 처리와 슬리피지 검증이 남아 있어 예시 설정을 실제 비용표로 바꾸지 않았습니다.
+
 학습에서 후보 선택 → 검증에서 veto → 변경 없는 미래 테스트를 반복합니다. 미래 테스트 구간은 겹치지 않습니다. 마지막 holdout은 이전 구간에서 선택한 한 버전으로 평가합니다. 블록 bootstrap의 블록 길이는 최소 5세션 또는 최대 보유기간이며, 등록 후보 수에 Bonferroni 보정을 적용합니다. 모델 가정과 작은 표본에 따른 불확실성이 있으므로 통과를 수익 보장으로 해석하지 않습니다.
 
 기본 연구 경로는 `cohort-research`입니다. 전략군당 최소 두 후보를 사전 등록하고 각 전략군에서 학습 성과로 한 버전을 선택합니다. 전략군별 검증과 동일 버전의 공유 자본 포트폴리오 검증을 같은 분할에서 수행합니다. 매 fold의 결합 시뮬레이션은 현금·종목/전략/섹터 비중·유동성 예산을 공유하며 독립 백테스트 수익률을 단순히 더하지 않습니다. 최종 버전은 holdout을 보기 전에 고정합니다. 하나의 holdout에서 미리 등록한 가족별/결합 평가를 수행하되 이를 독립적인 여러 실험으로 세지 않습니다.
@@ -172,6 +174,8 @@ dotnet run --project src/Investment.Cli --no-restore -- kind-delistings --start 
 ```
 
 분할·배당 공시 원문은 `kind-notice --source KIND공식외부공시주소`로 바이트와 관측시각을 보존합니다. `corporate-append`로 근거를 연결한 해석·정정·취소 기록을 추가하고 `corporate-at`으로 시장 기준시각과 기록부 기준시각을 지정해 조회합니다. 기본 방식은 실제 관측 이후만 허용합니다. 이 기록부 자체는 보유 수량·배당 현금이나 연구 인증을 변경하지 않습니다. [기업행위 근거와 시점별 조회](docs/corporate-actions.md)에 형식과 회계 적용 전제를 설명했습니다. 백테스트·paper의 분할·병합 회계에는 별도의 검토된 실행 입력이 필요합니다.
+
+`kind-publication`은 명시한 종목·기간·접수번호의 공개 목록 표시 시각을 뷰어와 정확한 원문 URL에 연결합니다. 최대 세 번의 읽기 전용 요청과 단계별 원본 보존을 사용하며, 분 단위 표시 시각에 시간대나 최초 공개 인증을 임의로 붙이지 않습니다. [명령·식별자 구분·시점 한계](docs/kind-publication-evidence.md)를 참고하세요.
 
 ```powershell
 dotnet run --project src/Investment.Cli --no-restore -- krx-collect --plan config/my-collection.json --max-requests 5 --interval-seconds 1

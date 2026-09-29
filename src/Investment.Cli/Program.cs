@@ -18,7 +18,7 @@ try
         return timestamp;
     }
     var command = args.FirstOrDefault() ?? "help";
-    var allowedOptions = new HashSet<string> { "--dataset", "--output", "--config", "--csv", "--source", "--start", "--end", "--corp-code", "--evidence", "--state", "--observation", "--persist", "--date", "--year", "--market", "--manifest", "--source-archive", "--archive", "--plan", "--max-requests", "--interval-seconds", "--ai-config", "--cutoff", "--recorded-cutoff", "--timing" };
+    var allowedOptions = new HashSet<string> { "--dataset", "--output", "--config", "--csv", "--source", "--start", "--end", "--corp-code", "--evidence", "--state", "--observation", "--persist", "--date", "--year", "--market", "--manifest", "--source-archive", "--archive", "--plan", "--max-requests", "--interval-seconds", "--ai-config", "--cutoff", "--recorded-cutoff", "--timing", "--ticker", "--acceptance-no" };
     for (var i = 1; i < args.Length; i++)
     {
         if (!allowedOptions.Contains(args[i])) throw new ArgumentException("Unknown or duplicated positional argument; no live-order options exist.");
@@ -155,6 +155,42 @@ try
                 snapshot.ObservedAt, snapshot.RawHash,
                 Note = "Exact response bytes observed now; no original publication timestamp, interpreted terms, accounting application, or certification." });
             break;
+        }
+        case "kind-publication":
+        {
+            var query = new KindPublicationQuery(Option("--ticker", ""),
+                DateOnly.ParseExact(Option("--start", ""), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+                DateOnly.ParseExact(Option("--end", ""), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+                Option("--acceptance-no", ""));
+            query.Validate(DateTimeOffset.UtcNow);
+            var id = Guid.NewGuid().ToString("N");
+            var archivePath = store.Save("source", id, sourceSnapshot);
+            var attemptPath = store.Save("kind-publication-attempt", id,
+                new { Query = query, StartedAt = DateTimeOffset.UtcNow, CodeVersion = code, SourceArchive = archivePath });
+            var captures = new List<string>();
+            using var client = new KindPublicationClient();
+            var receipt = await client.Fetch(query, preserveCapture: capture =>
+            {
+                captures.Add(store.Save("kind-publication-capture", Guid.NewGuid().ToString("N"), capture));
+                return Task.CompletedTask;
+            });
+            string? validationError = null;
+            try { receipt.Validate(DateTimeOffset.UtcNow); }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or FormatException or
+                OverflowException or System.Text.RegularExpressions.RegexMatchTimeoutException)
+            {
+                validationError = ex.GetType().Name;
+            }
+            var validation = validationError is null ? "PASSED" : "REJECTED";
+            var status = validationError is null ? receipt.Status : "RECEIPT_REQUIRES_REVIEW";
+            var path = store.Save("kind-publication", id,
+                new { CodeVersion = code, SourceArchive = archivePath, Attempt = attemptPath, Receipt = receipt, CaptureFiles = captures,
+                    ReceiptValidation = validation, ReceiptValidationErrorKind = validationError });
+            Print(new { path, Status = status, receipt.FailedStage, receipt.ErrorKind, Captures = receipt.Captures.Length,
+                ReceiptValidation = validation, ReceiptValidationErrorKind = validationError,
+                Publication = validationError is null ? receipt.Publication : null,
+                Note = "Current public-screen evidence only. Displayed minute has unverified timezone and first-publication meaning. The viewer ticker is a company representative, not all affected securities. External notice body is not fetched. No historical availability or ledger certification." });
+            return status == "COLLECTED_UNREVIEWED" ? 0 : 2;
         }
         case "kind-delistings":
         {
@@ -428,6 +464,7 @@ try
                   krx-review-queue --plan JSON
                   kind-delistings --start DATE --end DATE [--market ALL|KOSPI|KOSDAQ|KONEX --max-requests 5 --interval-seconds 1]
                   kind-notice --source KIND_EXTERNAL_HTML_URL
+                  kind-publication --ticker TICKER --start YYYY-MM-DD --end YYYY-MM-DD --acceptance-no ACCEPTANCE_ID
                   corporate-append --manifest JSON [--state prior-corporate-ledger.json]
                   corporate-at --state JSON --cutoff TIMESTAMP --recorded-cutoff TIMESTAMP [--timing OBSERVED|REVIEWED_PUBLICATION]
                   krx-basic-fetch --market KOSPI|KOSDAQ --date DATE
