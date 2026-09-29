@@ -27,7 +27,7 @@ public sealed class KrxAuditTests
             KrxClient.Parse(raw, date, "KOSPI"));
     }
 
-    [Fact] public void AuditDistinguishesRetainedCloseFromMissingOrBrokenPrices()
+    [Fact] public void AuditDistinguishesQuotedOrPriorCloseWithoutTurnoverFromMissingOrBrokenPrices()
     {
         var noTrade = Row(First) with { Open = 0, High = 0, Low = 0, Volume = 0, TradingValue = 0 };
         var missing = Row(First, "000002") with { Open = null };
@@ -37,6 +37,83 @@ public sealed class KrxAuditTests
         Assert.Contains(result.Issues, i => i.Code == "MISSING_OHLCV" && i.Ticker == "000002");
         Assert.Contains(result.Issues, i => i.Code == "INVALID_OHLCV" && i.Ticker == "000003");
         Assert.DoesNotContain(result.Issues, i => i.Ticker == "000001");
+    }
+
+    [Fact] public void ZeroRegularOhlWithPositiveTurnoverRemainsAnExplicitReviewWithoutChangingRawRowsOrNoTradeCounts()
+    {
+        // The reported close need not equal the average execution price of the non-regular turnover.
+        var mixed = Row(First) with { Open = 0, High = 0, Low = 0, Volume = 7, TradingValue = 665 };
+        var zeroTurnover = Row(First, "000002") with { Open = 0, High = 0, Low = 0, Volume = 0, TradingValue = 0 };
+        var source = Snapshot(First, mixed, zeroTurnover, Row(First, "000003"));
+        var before = JsonSerializer.Serialize(source);
+        var result = KrxDataAudit.Run([source], [First], ["KOSPI"], Now);
+        var issue = Assert.Single(result.Issues);
+        Assert.Equal("NON_REGULAR_TRADING_REQUIRES_REVIEW", issue.Code);
+        Assert.Equal(mixed.Ticker, issue.Ticker);
+        Assert.Equal("REVIEW_REQUIRED", result.Status);
+        Assert.Equal(1, Assert.Single(result.Days).NoTradeRows);
+        Assert.Equal(3, Assert.Single(result.Days).Rows);
+        Assert.Contains("quotation-based or a prior price", issue.Detail, StringComparison.Ordinal);
+        Assert.Contains("separate evidence", issue.Detail, StringComparison.Ordinal);
+        Assert.Equal(before, JsonSerializer.Serialize(source));
+        Assert.Equal(source.RawHash, Assert.Single(result.Inputs).RawHash);
+        Assert.Equal(source.ObservedAt, Assert.Single(result.Inputs).ObservedAt);
+    }
+
+    [Theory]
+    [InlineData("zero-volume")]
+    [InlineData("zero-value")]
+    [InlineData("zero-close")]
+    [InlineData("positive-open-only")]
+    [InlineData("positive-high-only")]
+    [InlineData("positive-low-only")]
+    [InlineData("zero-open-only")]
+    [InlineData("zero-high-only")]
+    [InlineData("zero-low-only")]
+    public void InconsistentTurnoverOrPartialZeroOhlDoesNotBecomeNonRegularTrading(string mutation)
+    {
+        var mixed = Row(First) with { Open = 0, High = 0, Low = 0, Volume = 7, TradingValue = 665 };
+        var row = mutation switch
+        {
+            "zero-volume" => mixed with { Volume = 0 },
+            "zero-value" => mixed with { TradingValue = 0 },
+            "zero-close" => mixed with { Close = 0 },
+            "positive-open-only" => mixed with { Open = 100 },
+            "positive-high-only" => mixed with { High = 100 },
+            "positive-low-only" => mixed with { Low = 100 },
+            "zero-open-only" => Row(First) with { Open = 0 },
+            "zero-high-only" => Row(First) with { High = 0 },
+            _ => Row(First) with { Low = 0 }
+        };
+        var result = KrxDataAudit.Run([Snapshot(First, row)], [First], ["KOSPI"], Now);
+        Assert.Equal("INVALID_OHLCV", Assert.Single(result.Issues).Code);
+        Assert.Equal(0, Assert.Single(result.Days).NoTradeRows);
+        Assert.Equal("REVIEW_REQUIRED", result.Status);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void MissingTurnoverFieldStillRequiresMissingDataReview(bool missingVolume)
+    {
+        var mixed = Row(First) with { Open = 0, High = 0, Low = 0, Volume = 7, TradingValue = 665 };
+        var row = missingVolume ? mixed with { Volume = null } : mixed with { TradingValue = null };
+        var result = KrxDataAudit.Run([Snapshot(First, row)], [First], ["KOSPI"], Now);
+        Assert.Equal("MISSING_OHLCV", Assert.Single(result.Issues).Code);
+        Assert.Equal(0, Assert.Single(result.Days).NoTradeRows);
+    }
+
+    [Fact] public void NonRegularClassificationCannotBypassRawProvenanceOrDatasetPriceValidation()
+    {
+        var mixed = Row(First) with { Open = 0, High = 0, Low = 0, Volume = 7, TradingValue = 665 };
+        var source = Snapshot(First, mixed);
+        var zeroTurnover = Snapshot(First, mixed with { Volume = 0, TradingValue = 0 });
+        Assert.Throws<ArgumentException>(() => KrxDataAudit.Run([source with { Rows = zeroTurnover.Rows }], [First], ["KOSPI"], Now));
+        Assert.Throws<ArgumentException>(() => KrxDataAudit.Run([source with { RawJson = zeroTurnover.RawJson }], [First], ["KOSPI"], Now));
+        Assert.Throws<ArgumentException>(() => KrxDataAudit.Run([source with { RawJson = zeroTurnover.RawJson, RawHash = zeroTurnover.RawHash }], [First], ["KOSPI"], Now));
+        var manifest = new KrxManifest("synthetic-review", [], [First],
+            [new(mixed.Ticker, First, "UNREVIEWED", false, false, source.ObservedAt)]);
+        Assert.Throws<ArgumentException>(() => KrxDatasetBuilder.Build([source], manifest));
     }
 
     [Fact] public void ObservedChangesRemainReviewFlagsRatherThanLifecycleProof()

@@ -55,10 +55,16 @@ public static class KrxDataAudit
                 {
                     var missing = row.Open == null || row.High == null || row.Low == null || row.Close == null || row.Volume == null || row.TradingValue == null;
                     var noTrade = row.Open == 0 && row.High == 0 && row.Low == 0 && row.Volume == 0 && row.TradingValue == 0 && row.Close > 0;
+                    // KRX OPEN API FAQ 27/25: OHL covers regular-session price formation, while
+                    // turnover also includes other sessions. This shape identifies a review need, not a halt or an executable price.
+                    var nonRegularTurnover = row.Open == 0 && row.High == 0 && row.Low == 0 && row.Close > 0 && row.Volume > 0 && row.TradingValue > 0;
                     var priced = row.Open > 0 && row.Low > 0 && row.Close > 0 && row.High >= Math.Max(row.Open.GetValueOrDefault(), row.Close.GetValueOrDefault()) &&
                         row.Low <= Math.Min(row.Open.GetValueOrDefault(), row.Close.GetValueOrDefault()) && row.Low <= row.High;
                     if (missing) issues.Add(new("MISSING_OHLCV", market, date, row.Ticker, "Missing reported values require source review."));
-                    else if (!(noTrade || priced)) issues.Add(new("INVALID_OHLCV", market, date, row.Ticker, "Neither a valid priced bar nor an exact retained-close no-trade row."));
+                    else if (nonRegularTurnover) issues.Add(new("NON_REGULAR_TRADING_REQUIRES_REVIEW", market, date, row.Ticker,
+                        "Zero regular-session OHL with positive total turnover can reflect non-regular trading. The reported close may be quotation-based or a prior price; session, suspension and execution require separate evidence."));
+                    else if (!(noTrade || priced)) issues.Add(new("INVALID_OHLCV", market, date, row.Ticker,
+                        "Neither a valid priced bar nor zero OHL with a positive reported close and consistent zero or positive turnover. A reported close may be quotation-based or a prior price."));
                     if (noTrade) noTradeCount++;
                     if (row.SharesOutstanding is null or <= 0)
                         issues.Add(new("MISSING_SHARE_COUNT", market, date, row.Ticker, "Share count cannot support corporate-action screening."));
