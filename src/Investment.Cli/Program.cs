@@ -201,6 +201,46 @@ try
                 Issues = report.Issues.Length, Changes = report.Changes.GroupBy(c => c.Kind).ToDictionary(g => g.Key, g => g.Count()), report.Note });
             break;
         }
+        case "krx-reference-audit":
+        {
+            var plan = Load<KrxReferenceAuditPlan>(Option("--plan", ""));
+            var report = KrxReferenceAudit.Run(plan, DateTimeOffset.UtcNow);
+            Print(new { path = store.Save("krx-reference-audit", report.Id, new { CodeVersion = code, Report = report }),
+                report.Status, Snapshots = report.Inputs.Length, MarketDays = report.Days.Length,
+                KnownPriceRows = report.Days.Sum(d => d.PriceRows ?? 0), KnownBasicRows = report.Days.Sum(d => d.BasicRows ?? 0),
+                KnownIndexRows = report.Days.Sum(d => d.IndexRows ?? 0), Issues = report.Issues.Length,
+                IdentityChanges = report.IdentityChanges.Length, report.Note });
+            break;
+        }
+        case "krx-review-queue":
+        {
+            var plan = Load<KrxReviewQueuePlan>(Option("--plan", ""));
+            if (plan.PriceAuditFiles == null || plan.ReferenceAuditFiles == null)
+                throw new ArgumentException("Both review report file lists are required.");
+            var paths = plan.PriceAuditFiles.Concat(plan.ReferenceAuditFiles).ToArray();
+            if (paths.Length is < 1 or > KrxReviewQueue.MaximumReports)
+                throw new ArgumentException("Review input exceeds the bounded report count.");
+            long fileBytes = 0;
+            string ReadReport(string path)
+            {
+                using var stream = File.OpenRead(path);
+                var length = stream.Length;
+                if (length > KrxReviewQueue.MaximumInputBytes - fileBytes)
+                    throw new ArgumentException("Review input exceeds the bounded file size.");
+                fileBytes += length;
+                var bytes = new byte[checked((int)length)];
+                stream.ReadExactly(bytes);
+                if (stream.ReadByte() != -1)
+                    throw new ArgumentException("Review input changed while being read.");
+                var offset = bytes.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF }) ? 3 : 0;
+                return new System.Text.UTF8Encoding(false, true).GetString(bytes, offset, bytes.Length - offset);
+            }
+            var report = KrxReviewQueue.Build(plan.PriceAuditFiles.Select(ReadReport).ToArray(),
+                plan.ReferenceAuditFiles.Select(ReadReport).ToArray(), DateTimeOffset.UtcNow);
+            Print(new { path = store.Save("krx-review-queue", report.Id, new { CodeVersion = code, Report = report }),
+                report.Hash, report.Status, Sources = report.Sources.Length, Buckets = report.Buckets.Length, report.Note });
+            break;
+        }
         case "krx-build":
         {
             var manifest = Load<KrxManifest>(Option("--manifest", ""));
@@ -384,6 +424,8 @@ try
                   paper-evaluate --state JSON
                   krx-fetch --market KOSPI|KOSDAQ --date DATE | krx-build --manifest JSON
                   krx-calendar --year YEAR [--start DATE --end DATE] | krx-audit --plan JSON
+                  krx-reference-audit --plan JSON
+                  krx-review-queue --plan JSON
                   kind-delistings --start DATE --end DATE [--market ALL|KOSPI|KOSDAQ|KONEX --max-requests 5 --interval-seconds 1]
                   kind-notice --source KIND_EXTERNAL_HTML_URL
                   corporate-append --manifest JSON [--state prior-corporate-ledger.json]
@@ -411,3 +453,4 @@ catch (Exception ex)
 internal sealed record Settings(Costs Costs, Risk Risk, ResearchPlan Plan, StrategySpec[] Candidates);
 internal sealed record DartContextPlan(string[] SnapshotFiles, string[] DisclosureFiles, string CorpCode, DateTimeOffset Cutoff);
 internal sealed record CorporateActionImport(CorporateActionRevision Revision, string[] SnapshotFiles);
+internal sealed record KrxReviewQueuePlan(string[] PriceAuditFiles, string[] ReferenceAuditFiles);

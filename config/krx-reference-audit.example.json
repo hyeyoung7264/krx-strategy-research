@@ -1,0 +1,10 @@
+{
+  "Sources": [
+    { "Service": "DAILY", "Market": "KOSPI", "Date": "2026-09-23", "SnapshotFile": "data/private/krx-kospi-daily-20260923.json" },
+    { "Service": "BASIC", "Market": "KOSPI", "Date": "2026-09-23", "SnapshotFile": "data/private/krx-kospi-basic-20260923.json" },
+    { "Service": "INDEX", "Market": "KOSPI", "Date": "2026-09-23", "SnapshotFile": "data/private/krx-kospi-index-20260923.json" }
+  ],
+  "ExpectedDates": [ "2026-09-23" ],
+  "Markets": [ "KOSPI" ],
+  "RequiredIndices": [ { "Market": "KOSPI", "IndexName": "코스피" } ]
+}

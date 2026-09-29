@@ -1,0 +1,4 @@
+{
+  "PriceAuditFiles": [ "data/private/price-audit.json" ],
+  "ReferenceAuditFiles": [ "data/private/reference-audit.json" ]
+}
