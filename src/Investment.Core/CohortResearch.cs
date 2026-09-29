@@ -63,7 +63,8 @@ public sealed class CohortAgent
         if (!plan.PolicyReviewed) failures.Add("RESEARCH_POLICY_NOT_REVIEWED");
         if (data.Synthetic) failures.Add("SYNTHETIC_DATA: engine evidence only");
         if (!data.PointInTimeCertified) failures.Add("DATA_NOT_POINT_IN_TIME_CERTIFIED");
-        if (hypothesesCreatedAt != null && Clock.Open(families[0].Folds[0].ValidationStart) <= hypothesesCreatedAt)
+        if (hypothesesCreatedAt != null && MarketSessions.OpeningTime(families[0].Folds[0].ValidationStart,
+                data.SessionHours, data.PointInTimeCertified) <= hypothesesCreatedAt)
             failures.Add("AI_HYPOTHESIS_POSTDATES_FORWARD_WINDOWS: historical evaluation is exploratory, not independent prospective validation");
         foreach (var family in families.Where(f => f.Evaluation.Decision != "PAPER_ELIGIBLE"))
             failures.Add("FAMILY_GATE_FAILED:" + family.Holdout.Strategies.Single().Family);

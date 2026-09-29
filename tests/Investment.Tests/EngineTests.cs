@@ -116,7 +116,9 @@ public sealed class EngineTests
         var newBars = data.Bars.Where(b => b.Date >= listed).Select(b => b with { Ticker = "B" });
         var sparse = data with { Bars = data.Bars.Concat(newBars).ToArray(), Sessions = data.Dates };
         Assert.Throws<ArgumentException>(() => sparse.Validate());
-        var documented = sparse with { LifecycleEvents = [new("B", listed, "LISTED", Clock.Open(listed).AddHours(-1), "listing-notice")] };
+        var documented = sparse with { LifecycleEvents = [new("B", listed, "LISTED", Clock.Open(listed).AddHours(-1), "listing-notice")],
+            SessionHours = data.Dates.Select(d => new SessionHours(d, Clock.Open(d), Clock.Close(d),
+                Clock.Open(d).AddDays(-1), "SYNTHETIC certified-branch session fixture")).ToArray() };
         documented.Validate();
         (documented with { PointInTimeCertified = true }).Validate();
         Assert.Throws<ArgumentException>(() => (documented with { Bars = documented.Bars.Where(b => b.Ticker != "B" || b.Date != data.Dates[3]).ToArray() }).Validate());
@@ -140,6 +142,8 @@ public sealed class EngineTests
         var data = Prices(100, 101, 102);
         var first = data.Dates[0];
         var bounded = data with { Sessions = data.Dates, PointInTimeCertified = true,
+            SessionHours = data.Dates.Select(d => new SessionHours(d, Clock.Open(d), Clock.Close(d),
+                Clock.Open(d).AddDays(-1), "SYNTHETIC certified-branch session fixture")).ToArray(),
             LifecycleEvents = [new("A", first, "LISTED", Clock.Open(first).AddDays(-1), "listing-notice")] };
         bounded.Validate();
         Assert.Equal(Run(data).Equity, Run(bounded).Equity);

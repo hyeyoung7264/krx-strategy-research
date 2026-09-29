@@ -15,8 +15,9 @@ public sealed record ShareUnitAdjustment(string ActionKey, string Ticker, DateTi
 public static class ShareUnits
 {
     public static void Validate(ShareUnitChange[]? changes, ShareInventoryCredit[]? credits,
-        Bar[]? bars = null, SecurityLifecycleEvent[]? lifecycle = null)
+        Bar[]? bars = null, SecurityLifecycleEvent[]? lifecycle = null, SessionHours[]? hours = null, bool requireExplicit = false)
     {
+        MarketSessions.Validate(hours, [], requireExplicit);
         var actions = changes ?? []; var inventory = credits ?? [];
         if (actions.Any(c => c is null) || inventory.Any(c => c is null)) throw new ArgumentException("Missing share-unit input.");
         if (actions.GroupBy(c => c.ActionKey, StringComparer.Ordinal).Any(g => g.Count() != 1) ||
@@ -25,7 +26,8 @@ public static class ShareUnits
             throw new ArgumentException("Share-unit changes and inventory credits require unique action keys.");
         foreach (var change in actions)
         {
-            ValidateChange(change);
+            ValidateChangeShape(change);
+            if (NeedsTiming(change)) ValidateChangeTiming(change, hours, requireExplicit);
             if (bars is not null && !bars.Any(b => b.Ticker == change.Ticker))
                 throw new ArgumentException("Share-unit change refers to a missing security.");
         }
@@ -33,7 +35,9 @@ public static class ShareUnits
         {
             var change = actions.SingleOrDefault(c => c.ActionKey == credit.ActionKey);
             if (change is null || string.IsNullOrWhiteSpace(credit.Evidence) ||
-                credit.CreditedAt < Clock.Open(change.EffectiveDate) || credit.AvailableAt < credit.CreditedAt)
+                credit.AvailableAt < credit.CreditedAt ||
+                DateOnly.FromDateTime(credit.CreditedAt.ToOffset(TimeSpan.FromHours(9)).DateTime) < change.EffectiveDate ||
+                NeedsTiming(change) && credit.CreditedAt < MarketSessions.OpeningTime(change.EffectiveDate, hours, requireExplicit))
                 throw new ArgumentException("Inventory credit must reference a change and cannot precede economic effectiveness or observation.");
         }
         foreach (var change in actions)
@@ -50,27 +54,39 @@ public static class ShareUnits
             if (bar.Tradable && actions.Any(c => c.Ticker == bar.Ticker && c.EffectiveDate <= bar.Date && bar.Date < c.PriceUnitDate))
                 throw new ArgumentException("Tradable bar inside economic-to-price-unit transition.");
         }
+        // A known future announcement can precede the publication of that future session's hours.
+        // Its actual timing is required once its effective date is reached or applied to a holding.
+        bool NeedsTiming(ShareUnitChange change) => hours is null || requireExplicit ||
+            hours.Any(h => h.Date == change.EffectiveDate) || (bars?.Any(b => b.Date >= change.EffectiveDate) ?? false);
     }
 
-    private static void ValidateChange(ShareUnitChange change)
+    private static void ValidateChangeShape(ShareUnitChange change)
     {
         if (change is null || string.IsNullOrWhiteSpace(change.ActionKey) || change.ActionKey.Any(char.IsControl) ||
             string.IsNullOrWhiteSpace(change.Ticker) || string.IsNullOrWhiteSpace(change.Evidence) ||
             change.EffectiveDate == default || change.PriceUnitDate < change.EffectiveDate ||
             change.NewShares <= 0 || change.OldShares <= 0 || change.NewShares == change.OldShares ||
-            change.AvailableAt == default || change.AvailableAt > Clock.Open(change.EffectiveDate))
+            change.AvailableAt == default ||
+            DateOnly.FromDateTime(change.AvailableAt.ToOffset(TimeSpan.FromHours(9)).DateTime) > change.EffectiveDate)
             throw new ArgumentException("Invalid or late share-unit change evidence.");
     }
 
-    public static (int Quantity, decimal StopLoss) Adjust(int quantity, decimal stop, ShareUnitChange change)
+    private static void ValidateChangeTiming(ShareUnitChange change, SessionHours[]? hours, bool requireExplicit)
     {
-        if (stop <= 0) throw new ArgumentException("Invalid share-unit holding stop.");
-        return (AdjustQuantity(quantity, change), StopLoss(stop, [change]));
+        if (change.AvailableAt > MarketSessions.OpeningTime(change.EffectiveDate, hours, requireExplicit))
+            throw new ArgumentException("Share-unit change evidence is unavailable at the effective session opening.");
     }
 
-    public static int AdjustQuantity(int quantity, ShareUnitChange change)
+    public static (int Quantity, decimal StopLoss) Adjust(int quantity, decimal stop, ShareUnitChange change,
+        SessionHours[]? hours = null, bool requireExplicit = false)
     {
-        ValidateChange(change);
+        if (stop <= 0) throw new ArgumentException("Invalid share-unit holding stop.");
+        return (AdjustQuantity(quantity, change, hours, requireExplicit), StopLoss(stop, [change], hours, requireExplicit));
+    }
+
+    public static int AdjustQuantity(int quantity, ShareUnitChange change, SessionHours[]? hours = null, bool requireExplicit = false)
+    {
+        ValidateChangeShape(change); ValidateChangeTiming(change, hours, requireExplicit);
         if (quantity <= 0) throw new ArgumentException("Invalid share-unit holding quantity.");
         var scaled = BigInteger.DivRem((BigInteger)quantity * change.NewShares, change.OldShares, out var fraction);
         if (!fraction.IsZero || scaled <= 0 || scaled > int.MaxValue)
@@ -78,13 +94,14 @@ public static class ShareUnits
         return (int)scaled;
     }
 
-    public static decimal StopLoss(decimal originalStop, IEnumerable<ShareUnitChange> appliedChanges)
+    public static decimal StopLoss(decimal originalStop, IEnumerable<ShareUnitChange> appliedChanges,
+        SessionHours[]? hours = null, bool requireExplicit = false)
     {
         if (originalStop <= 0) throw new ArgumentException("Invalid original share-unit stop.");
         BigInteger numerator = 1, denominator = 1;
         foreach (var change in appliedChanges)
         {
-            ValidateChange(change);
+            ValidateChangeShape(change); ValidateChangeTiming(change, hours, requireExplicit);
             MultiplyRatio(ref numerator, ref denominator, change.OldShares, change.NewShares);
         }
         return Scale(originalStop, numerator, denominator);
@@ -140,13 +157,13 @@ public static class ShareUnits
     }
 
     public static Signal? GenerateSignal(StrategySpec spec, Bar[] rawBars, DateOnly economicDate,
-        DateTimeOffset knownAt, ShareUnitChange[]? changes)
+        DateTimeOffset knownAt, ShareUnitChange[]? changes, SessionHours[]? hours = null, bool requireExplicit = false)
     {
         var relevant = (changes ?? []).Where(c => c.AvailableAt <= knownAt && rawBars.Any(b => b.Ticker == c.Ticker &&
                 (c.PriceUnitDate <= b.Date) != (c.EffectiveDate <= economicDate)))
             .OrderBy(c => c.EffectiveDate).ThenBy(c => c.ActionKey, StringComparer.Ordinal).ToArray();
-        if (relevant.Length == 0) return new PriceStrategy(spec).Generate(rawBars, knownAt);
-        var signal = new PriceStrategy(spec).Generate(SignalHistory(rawBars, economicDate, knownAt, relevant), knownAt);
+        if (relevant.Length == 0) return new PriceStrategy(spec).Generate(rawBars, knownAt, hours, requireExplicit);
+        var signal = new PriceStrategy(spec).Generate(SignalHistory(rawBars, economicDate, knownAt, relevant), knownAt, hours, requireExplicit);
         if (signal is null) return null;
         var evidence = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { RawBars = rawBars, ShareUnitChanges = relevant })));
         return signal with { Price = rawBars[^1].Close, EvidenceHash = evidence };

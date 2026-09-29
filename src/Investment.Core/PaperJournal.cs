@@ -56,7 +56,10 @@ public sealed class PaperJournal(string directory)
             state.TradingDate != null || state.Cash != state.InitialCapital || state.Peak != state.InitialCapital || state.DayStartEquity != state.InitialCapital)
             throw new ArgumentException("New paper session requires versioned genesis, frozen research candidate count and empty trading ledger.");
         state.Costs.Validate(); state.Risk.Validate();
-        ShareUnits.Validate(state.ShareUnitChanges, state.ShareInventoryCredits, state.History, state.LifecycleEvents);
+        MarketSessions.Validate(state.SessionHours, state.History.Select(b => b.Date), state.SessionHours is not null);
+        if ((state.SessionHours ?? []).Any(h => h.AvailableAt > state.LastObservation))
+            throw new ArgumentException("Paper genesis cannot contain unobserved session hours.");
+        ShareUnits.Validate(state.ShareUnitChanges, state.ShareInventoryCredits, state.History, state.LifecycleEvents, state.SessionHours);
         if ((state.ShareUnitChanges ?? []).Any(c => c.AvailableAt > state.LastObservation) ||
             (state.ShareInventoryCredits ?? []).Any(c => c.AvailableAt > state.LastObservation))
             throw new ArgumentException("Paper genesis cannot contain unobserved share-unit or inventory evidence.");

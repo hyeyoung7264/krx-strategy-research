@@ -12,7 +12,9 @@ public sealed class PaperEvidenceTests
         var source = SourceSnapshot.Capture(root?.FullName ?? throw new InvalidOperationException("Repository root missing."), typeof(ResearchAgent).Assembly);
         // Mock certification only to reach archive checks. Policy remains unreviewed; this is not market evidence.
         var seed = DataFiles.Demo(180);
-        var data = seed with { Source = "TEST_FIXTURE_NOT_MARKET_EVIDENCE", Synthetic = false, PointInTimeCertified = true, Sessions = seed.Dates };
+        var data = seed with { Source = "TEST_FIXTURE_NOT_MARKET_EVIDENCE", Synthetic = false, PointInTimeCertified = true, Sessions = seed.Dates,
+            SessionHours = seed.Dates.Select(d => new SessionHours(d, Clock.Open(d), Clock.Close(d),
+                Clock.Open(d).AddDays(-1), "SYNTHETIC certified-branch session fixture")).ToArray() };
         var research = new ResearchAgent().Run(data, new BaselineHypotheses().Generate(), new(60, 30, 30, 30, 1, 30), new(), new(), source.Hash);
         return (new(1, data, source, Research: research), source);
     }

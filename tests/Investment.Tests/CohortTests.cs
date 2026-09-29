@@ -81,7 +81,9 @@ public sealed class CohortTests
             }
             trend *= 1.002m;
         }
-        return new("FABRICATED ACCOUNTING FIXTURE NOT MARKET EVIDENCE", false, true, bars.ToArray(), dates.ToArray());
+        return new("FABRICATED ACCOUNTING FIXTURE NOT MARKET EVIDENCE", false, true, bars.ToArray(), dates.ToArray(),
+            SessionHours: dates.Select(d => new SessionHours(d, Clock.Open(d), Clock.Close(d),
+                Clock.Open(d).AddDays(-1), "FABRICATED SESSION FIXTURE NOT MARKET EVIDENCE")).ToArray());
     }
     [Fact] public void PassingJointCohortCanStartPaperWithoutReusingSeparateHoldouts()
     {

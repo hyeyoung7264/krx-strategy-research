@@ -75,10 +75,15 @@ internal static class CostSensitivityData
         var tickers = bars.Select(b => b.Ticker).ToHashSet(StringComparer.Ordinal);
         var events = data.LifecycleEvents?.Where(e => e.Date < holdoutStart && tickers.Contains(e.Ticker)).ToArray();
         if (bars.Length == 0) throw new ArgumentException("Cost diagnostics require observations before holdout.");
-        var units = ShareUnitPrefix.Select(data, tickers, bars.Max(b => b.Date), Clock.Open(holdoutStart).AddTicks(-1));
+        var knownAt = MarketSessions.OpeningTime(holdoutStart, data.SessionHours, data.PointInTimeCertified).AddTicks(-1);
+        if ((data.SessionHours ?? []).Any(h => h.Date == holdoutStart && h.AvailableAt > knownAt))
+            throw new ArgumentException("Holdout opening schedule was unavailable at the diagnostic cutoff.");
+        var units = ShareUnitPrefix.Select(data, tickers, bars.Max(b => b.Date), knownAt);
         var trimmed = data with { Bars = bars, Sessions = data.Sessions?.Where(d => d < holdoutStart).ToArray(),
             LifecycleEvents = events is { Length: > 0 } ? events : null,
-            ShareUnitChanges = units.Changes, ShareInventoryCredits = units.Credits };
+            ShareUnitChanges = units.Changes, ShareInventoryCredits = units.Credits,
+            SessionHours = MarketSessions.Prefix(data.SessionHours,
+                bars.Select(b => b.Date).Concat((units.Changes ?? []).Select(c => c.EffectiveDate)), knownAt) };
         trimmed.Validate();
         return trimmed;
     }

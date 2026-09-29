@@ -113,7 +113,9 @@ public sealed class AiResearchWorker(string directory)
         if (data.Dates.Length < plan.TrainSessions + plan.ValidationSessions + 2 * plan.TestSessions + plan.HoldoutSessions)
             throw new ArgumentException("AI exploration requires the research calendar; it never consumes reserved holdout.");
         var dates = data.Dates.Take(plan.TrainSessions).ToArray(); var set = dates.ToHashSet();
-        var knownAt = Clock.Open(data.Dates[plan.TrainSessions]).AddTicks(-1);
+        var knownAt = MarketSessions.OpeningTime(data.Dates[plan.TrainSessions], data.SessionHours, data.PointInTimeCertified).AddTicks(-1);
+        if ((data.SessionHours ?? []).Any(h => h.Date == data.Dates[plan.TrainSessions] && h.AvailableAt > knownAt))
+            throw new ArgumentException("Validation opening schedule was unavailable at the training cutoff.");
         // Source labels and full-data hashes are excluded from the model prompt.
         // Preserve the listing boundaries that explain gaps inside this prefix, without
         // including future lifecycle notices in its content hash or model input.
@@ -126,7 +128,9 @@ public sealed class AiResearchWorker(string directory)
         var events = data.LifecycleEvents?.Where(e => set.Contains(e.Date) && tickers.Contains(e.Ticker)).ToArray();
         var units = ShareUnitPrefix.Select(data, tickers, dates[^1], knownAt);
         var training = new Dataset("TRAINING_ONLY", data.Synthetic, false,
-            bars, dates, events is { Length: > 0 } ? events : null, units.Changes, units.Credits);
+            bars, dates, events is { Length: > 0 } ? events : null, units.Changes, units.Credits,
+            MarketSessions.Prefix(data.SessionHours,
+                dates.Concat((units.Changes ?? []).Select(c => c.EffectiveDate)), knownAt));
         // Reject unusable training before a paid provider request or attempt is recorded.
         training.Validate();
         return training;
@@ -140,7 +144,7 @@ public sealed class AiResearchWorker(string directory)
         var store = new EvidenceStore(directory); var id = Guid.NewGuid().ToString("N"); var rounds = new List<AiRound>();
         var status = "REQUEST_BUDGET_EXHAUSTED"; string? error = null; var seen = new HashSet<string>();
         var sessionOffsets = training.Dates.Select((date, offset) => (date, offset)).ToDictionary(x => x.date, x => x.offset);
-        var trainingKnownAt = Clock.Open(data.Dates[plan.TrainSessions]).AddTicks(-1);
+        var trainingKnownAt = MarketSessions.OpeningTime(data.Dates[plan.TrainSessions], data.SessionHours, data.PointInTimeCertified).AddTicks(-1);
         var economicDate = training.Dates[^1];
         // Cost schedules can contain real dates, source labels and future policy. Expose
         // only the rates applied to this anonymous training calendar.

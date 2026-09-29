@@ -20,6 +20,10 @@ public sealed class BacktestEngine
         if (initial <= 0 || specs.Length == 0 || specs.Select(s => s.Id).Distinct().Count() != specs.Length) throw new ArgumentException("Invalid capital/strategies.");
         foreach (var s in specs) s.Validate();
         var dates = data.Dates;
+        var openingTimes = dates.ToDictionary(date => date, date => MarketSessions.OpeningTime(date, data.SessionHours, data.PointInTimeCertified));
+        var closingTimes = dates.ToDictionary(date => date, date => MarketSessions.ClosingTime(date, data.SessionHours, data.PointInTimeCertified));
+        DateTimeOffset Opening(DateOnly date) => openingTimes[date];
+        DateTimeOffset Closing(DateOnly date) => closingTimes[date];
         if (start > end || !dates.Contains(start) || !dates.Contains(end)) throw new ArgumentException("Invalid period.");
         costs.RequireCoverage(dates.Where(date => date >= start && date <= end));
         var byDate = data.Bars.GroupBy(b => b.Date).ToDictionary(g => g.Key, g => g.OrderBy(b => b.Ticker, StringComparer.Ordinal).ToArray());
@@ -38,8 +42,10 @@ public sealed class BacktestEngine
             if (holdings.Any(p => !map.ContainsKey(p.EntryBar.Ticker)))
                 throw new InvalidOperationException("Held security disappeared without a verified settlement or corporate-action valuation; backtest stopped.");
             var prior = i == 0 ? null : byDate[dates[i - 1]];
-            var decisionTime = Clock.Open(date).AddTicks(-1);
-            var openingTime = Clock.Open(date);
+            var openingTime = Opening(date);
+            var decisionTime = openingTime.AddTicks(-1);
+            if ((data.SessionHours ?? []).Any(h => h.Date == date && h.AvailableAt > decisionTime))
+                throw new ArgumentException("Session opening schedule was unavailable at the simulated pre-open decision time.");
             // Rights change economic holdings before marks, risk checks or any attempted execution, even while halted.
             foreach (var change in (data.ShareUnitChanges ?? []).Where(c => c.EffectiveDate <= date && c.AvailableAt <= openingTime)
                          .OrderBy(c => c.EffectiveDate).ThenBy(c => c.ActionKey, StringComparer.Ordinal))
@@ -49,12 +55,13 @@ public sealed class BacktestEngine
                     var position = holdings[holdingIndex];
                     if (position.EntryBar.Ticker != change.Ticker || position.EntryBar.Date >= change.EffectiveDate ||
                         position.AppliedShareActionKeys.Contains(change.ActionKey, StringComparer.Ordinal)) continue;
-                    var quantity = ShareUnits.AdjustQuantity(position.Quantity, change);
+                    var quantity = ShareUnits.AdjustQuantity(position.Quantity, change, data.SessionHours, data.PointInTimeCertified);
                     var appliedKeys = position.AppliedShareActionKeys.Append(change.ActionKey).ToArray();
                     var stop = ShareUnits.StopLoss(position.OriginalStopLoss,
-                        (data.ShareUnitChanges ?? []).Where(c => appliedKeys.Contains(c.ActionKey, StringComparer.Ordinal)));
+                        (data.ShareUnitChanges ?? []).Where(c => appliedKeys.Contains(c.ActionKey, StringComparer.Ordinal)),
+                        data.SessionHours, data.PointInTimeCertified);
                     holdings[holdingIndex] = position with { Quantity = quantity, CurrentStopLoss = stop, AppliedShareActionKeys = appliedKeys };
-                    adjustments.Add(new(change.ActionKey, change.Ticker, openingTime, position.Strategy.Id, Clock.Open(position.EntryBar.Date),
+                    adjustments.Add(new(change.ActionKey, change.Ticker, openingTime, position.Strategy.Id, Opening(position.EntryBar.Date),
                         position.Quantity, quantity, position.CurrentStopLoss, stop, position.Paid, ShareUnits.Hash(change)));
                 }
             }
@@ -73,7 +80,7 @@ public sealed class BacktestEngine
                 if (known is null) throw new InvalidOperationException("No published prior close for opening valuation.");
                 return ShareUnits.EconomicPrice(known.Close, b.Ticker, known.Date, date, openingTime, data.ShareUnitChanges);
             }
-            decimal ClosingMark(Bar b) => ShareUnits.EconomicPrice(b.Close, b.Ticker, b.Date, date, Clock.Close(date), data.ShareUnitChanges);
+            decimal ClosingMark(Bar b) => ShareUnits.EconomicPrice(b.Close, b.Ticker, b.Date, date, Closing(date), data.ShareUnitChanges);
             var liquidityUsed = new Dictionary<string, int>();
             int RemainingLiquidity(string ticker)
             {
@@ -94,8 +101,8 @@ public sealed class BacktestEngine
                 var paid = p.Paid * quantity / p.Quantity;
                 liquidityUsed[b.Ticker] = liquidityUsed.GetValueOrDefault(b.Ticker) + quantity;
                 cash += proceeds; turnover += amount;
-                trades.Add(new(p.Strategy.Id, b.Ticker, p.Signal.Time, p.Signal.Price, Clock.Open(p.EntryBar.Date), p.Price,
-                    reason == "stop" ? Clock.Close(date) : Clock.Open(date), price, quantity, proceeds - paid,
+                trades.Add(new(p.Strategy.Id, b.Ticker, p.Signal.Time, p.Signal.Price, Opening(p.EntryBar.Date), p.Price,
+                    reason == "stop" ? Closing(date) : openingTime, price, quantity, proceeds - paid,
                     proceeds / paid - 1, reason, p.Signal.EvidenceHash, quantity == p.Quantity,
                     p.AppliedShareActionKeys.Length == 0 ? null : p.AppliedShareActionKeys.ToArray(), p.InitialQuantity, paid));
                 holdings.Remove(p);
@@ -137,7 +144,7 @@ public sealed class BacktestEngine
                         : DateOnly.MinValue;
                     var past = history[ticker].Where(b => b.Date >= latestListing && b.Date <= dates[i - 1] && b.AvailableAt <= now).ToArray();
                     if (past.Length == 0 || past[^1].Date != dates[i - 1]) continue;
-                    var signal = ShareUnits.GenerateSignal(spec, past, date, now, data.ShareUnitChanges);
+                    var signal = ShareUnits.GenerateSignal(spec, past, date, now, data.ShareUnitChanges, data.SessionHours, data.PointInTimeCertified);
                     if (signal != null) candidates.Add((spec, signal));
                 }
                 foreach (var candidate in candidates.OrderByDescending(c => c.Signal.Score).ThenBy(c => c.Spec.Id, StringComparer.Ordinal).ThenBy(c => c.Signal.Ticker, StringComparer.Ordinal))
@@ -188,7 +195,8 @@ public sealed class BacktestEngine
         var dates = data.Dates;
         if (throughIndex < 20) return "unknown";
         // Point-in-time equal-weight proxy, using only continuously present members in the trailing window.
-        var end = dates[throughIndex]; var begin = dates[throughIndex - 20]; var now = knownAt ?? Clock.Close(end);
+        var end = dates[throughIndex]; var begin = dates[throughIndex - 20];
+        var now = knownAt ?? MarketSessions.ClosingTime(end, data.SessionHours, data.PointInTimeCertified);
         var moves = data.Bars.Where(b => b.Date >= begin && b.Date <= end).GroupBy(b => b.Ticker)
             .Where(g => g.Count() == 21 && g.All(b => b.Member && b.Tradable && b.Volume > 0 && b.AvailableAt <= now))
             .Select(g => { var a = ShareUnits.SignalHistory(g.OrderBy(b => b.Date).ToArray(), end, now, data.ShareUnitChanges); return a[^1].Close / a[0].Close - 1; }).ToArray();

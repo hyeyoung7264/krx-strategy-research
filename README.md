@@ -58,7 +58,7 @@ dotnet run --project src/Investment.Cli --no-restore -- cohort-research --datase
 
 날짜 형식은 `yyyy-MM-dd`, AvailableAt에는 명시적 timezone이 필요합니다. Member/섹터/거래 가능 상태는 해당 거래일 당시 자료여야 합니다. 상장된 기간에는 거래정지·무거래 행까지 매 세션 보존합니다. 상장 전과 폐지 후의 행은 만들지 않고, 종목이 나타나거나 사라지는 경계에는 출처와 공개시각을 가진 `LifecycleEvents`를 요구합니다. 보유 종목이 폐지 등으로 가격 없이 사라지면 회수·권리 처리 증거가 없는 백테스트를 중단합니다. 날짜를 임의로 채워 만든 종목이나 잔여 가치를 실제 데이터로 인증하면 안 됩니다.
 
-CSV 수입은 `PointInTimeCertified=false`로 생성됩니다. 인증은 데이터 품질·역사적 universe·수정주가·시점·공식 거래일 캘린더의 별도 검토가 필요합니다. 인증된 JSON에는 `Sessions`에 실제 거래일을 순서대로 명시해야 합니다. 단순히 flag를 바꾸면 품질이 검증되는 것은 아닙니다. `CorporateAction=true`인 자료는 대응하는 명시적 주식 단위 변경이 필요합니다. 분할·병합의 효력일·원시 가격 전환일·입고 가용성을 구분하며, 미지원 단주나 다른 권리의 정산을 추정하지 않습니다. [분할·병합 회계](docs/share-unit-accounting.md)를 참고하세요.
+CSV 수입은 `PointInTimeCertified=false`로 생성됩니다. 인증은 데이터 품질·역사적 universe·수정주가·시점·공식 거래일 캘린더의 별도 검토가 필요합니다. 인증된 JSON에는 `Sessions`에 실제 거래일을, `SessionHours`에 날짜별 개장·마감·공개시각과 근거를 명시해야 합니다. 특별 개장일도 같은 시간표로 계산합니다. [날짜별 정규장 시간](docs/session-hours.md). 단순히 flag를 바꾸면 품질이 검증되는 것은 아닙니다. `CorporateAction=true`인 자료는 대응하는 명시적 주식 단위 변경이 필요합니다. 분할·병합의 효력일·원시 가격 전환일·입고 가용성을 구분하며, 미지원 단주나 다른 권리의 정산을 추정하지 않습니다. [분할·병합 회계](docs/share-unit-accounting.md)를 참고하세요.
 
 ## OpenDART
 

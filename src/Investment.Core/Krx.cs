@@ -19,7 +19,9 @@ public sealed record KrxManifest(string Version, string[] SnapshotFiles, DateOnl
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     ShareUnitChange[]? ShareUnitChanges = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    ShareInventoryCredit[]? ShareInventoryCredits = null);
+    ShareInventoryCredit[]? ShareInventoryCredits = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    SessionHours[]? SessionHours = null);
 
 public sealed class KrxClient(HttpClient http, Func<DateTimeOffset>? clock = null)
 {
@@ -107,7 +109,7 @@ public static class KrxDatasetBuilder
         }).OrderBy(b => b.Date).ThenBy(b => b.Ticker, StringComparer.Ordinal).ToArray();
         var data = new Dataset("KRX approved API; manifest=" + manifest.Version + "; review=" + manifest.ReviewEvidence, false,
             manifest.PointInTimeReviewed, bars, manifest.Sessions, manifest.LifecycleEvents,
-            manifest.ShareUnitChanges, manifest.ShareInventoryCredits);
+            manifest.ShareUnitChanges, manifest.ShareInventoryCredits, manifest.SessionHours);
         data.Validate(); return data;
     }
 }

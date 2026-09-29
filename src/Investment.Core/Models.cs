@@ -14,7 +14,9 @@ public sealed record Dataset(string Source, bool Synthetic, bool PointInTimeCert
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     ShareUnitChange[]? ShareUnitChanges = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    ShareInventoryCredit[]? ShareInventoryCredits = null)
+    ShareInventoryCredit[]? ShareInventoryCredits = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    SessionHours[]? SessionHours = null)
 {
     [System.Text.Json.Serialization.JsonIgnore]
     public string Hash => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(this))));
@@ -23,7 +25,13 @@ public sealed record Dataset(string Source, bool Synthetic, bool PointInTimeCert
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(Source) || Bars.Length == 0) throw new ArgumentException("Missing dataset/source.");
-        ShareUnits.Validate(ShareUnitChanges, ShareInventoryCredits, Bars, LifecycleEvents);
+        var dates = Dates;
+        MarketSessions.Validate(SessionHours, dates, PointInTimeCertified);
+        ShareUnits.Validate(ShareUnitChanges, ShareInventoryCredits, Bars, LifecycleEvents, SessionHours, PointInTimeCertified);
+        var dateSet = dates.ToHashSet();
+        if (PointInTimeCertified && (ShareUnitChanges ?? []).Any(c => !dateSet.Contains(c.EffectiveDate)))
+            throw new ArgumentException("Certified share-unit effective dates outside dataset sessions are unsupported; do not invent session anchors.");
+        var hoursByDate = SessionHours?.ToDictionary(row => row.Date);
         if (Bars.GroupBy(b => (b.Ticker, b.Date)).Any(g => g.Count() != 1)) throw new ArgumentException("Duplicate bar.");
         foreach (var b in Bars)
         {
@@ -35,10 +43,10 @@ public sealed record Dataset(string Source, bool Synthetic, bool PointInTimeCert
             if (string.IsNullOrWhiteSpace(b.Ticker) || string.IsNullOrWhiteSpace(b.Sector) || b.Close <= 0 ||
                 b.Volume < 0 || b.TradingValue < 0 || !(priced || noTrade))
                 throw new ArgumentException("Invalid OHLCV.");
-            if (b.AvailableAt < Clock.Close(b.Date)) throw new ArgumentException("Daily bar available before close.");
+            var close = hoursByDate is null ? Clock.Close(b.Date) : hoursByDate[b.Date].CloseAt;
+            if (b.AvailableAt < close) throw new ArgumentException("Daily bar available before close.");
         }
         // Absence outside a security's listed interval needs an explicit event; gaps inside it are errors.
-        var dates = Dates;
         if (PointInTimeCertified && (Sessions == null || !Sessions.SequenceEqual(dates))) throw new ArgumentException("Certified data requires an explicit ordered exchange session calendar matching all bars.");
         if (Sessions != null && (!Sessions.SequenceEqual(Sessions.Distinct().Order()) || !Sessions.SequenceEqual(dates))) throw new ArgumentException("Session calendar is incomplete/unordered.");
         var events = LifecycleEvents ?? [];
@@ -47,7 +55,8 @@ public sealed record Dataset(string Source, bool Synthetic, bool PointInTimeCert
         foreach (var e in events)
         {
             if (!tickers.Contains(e.Ticker) || !dates.Contains(e.Date) || e.Kind is not ("LISTED" or "DELISTED") ||
-                string.IsNullOrWhiteSpace(e.Evidence) || (PointInTimeCertified && e.AvailableAt > Clock.Open(e.Date)))
+                string.IsNullOrWhiteSpace(e.Evidence) || (PointInTimeCertified &&
+                    e.AvailableAt > hoursByDate![e.Date].OpenAt))
                 throw new ArgumentException("Invalid or late security lifecycle evidence.");
         }
         var eventByKey = events.ToDictionary(e => (e.Ticker, e.Date));
@@ -113,10 +122,14 @@ public interface IStrategy { StrategySpec Spec { get; } Signal? Generate(IReadOn
 public sealed class PriceStrategy(StrategySpec spec) : IStrategy
 {
     public StrategySpec Spec { get; } = spec;
-    public Signal? Generate(IReadOnlyList<Bar> history, DateTimeOffset now)
+    public Signal? Generate(IReadOnlyList<Bar> history, DateTimeOffset now) => Generate(history, now, null);
+    public Signal? Generate(IReadOnlyList<Bar> history, DateTimeOffset now, SessionHours[]? hours, bool requireExplicit = false)
     {
         Spec.Validate();
-        if (history.Any(b => b.AvailableAt > now || Clock.Close(b.Date) > now)) throw new ArgumentException("Future observation.");
+        MarketSessions.Validate(hours, history.Select(b => b.Date), requireExplicit);
+        var hoursByDate = hours?.ToDictionary(row => row.Date);
+        if (history.Any(b => b.AvailableAt > now || (hoursByDate is null ? Clock.Close(b.Date) : hoursByDate[b.Date].CloseAt) > now))
+            throw new ArgumentException("Future observation.");
         if (history.Count < Spec.Lookback + 1) return null;
         var last = history[^1];
         if (!last.Tradable || !last.Member || last.Volume == 0) return null;
